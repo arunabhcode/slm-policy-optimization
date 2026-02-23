@@ -16,22 +16,15 @@ import builtins
 import logging
 import os
 import sys
-from dataclasses import dataclass, field
 
 import datasets
 import torch
 import transformers
-import yaml
 from datasets import load_dataset
 from transformers import set_seed
 from transformers.trainer_utils import get_last_checkpoint
 from gspo import GSPOTrainer
 
-# Compatibility shim: rewards.py evaluates `AsyncSandbox` in type annotations at import time.
-if not hasattr(builtins, "AsyncSandbox"):
-    builtins.AsyncSandbox = object  # type: ignore[attr-defined]
-
-# from open_r1.configs import GRPOConfig
 from open_r1.rewards import (
     accuracy_reward,
     code_reward,
@@ -45,7 +38,7 @@ from open_r1.rewards import (
 )
 
 from open_r1.config import GSPOConfig
-# from open_r1.utils import get_tokenizer
+from open_r1.utils.model_utils import get_tokenizer
 # from open_r1.utils.callbacks import get_callbacks
 # from open_r1.utils.wandb_logging import init_wandb_training
 
@@ -91,7 +84,7 @@ def main(config):
     ################
     # Load tokenizer
     ################
-    tokenizer = get_tokenizer(config.model_args, config.training_args)
+    tokenizer = get_tokenizer(config)
 
     # Get reward functions
     REWARD_FUNCS_REGISTRY = {
@@ -106,8 +99,8 @@ def main(config):
             max_len=config.cosine_max_len,
         ),
         "repetition_penalty": get_repetition_penalty_reward(
-            ngram_size=script_args.repetition_n_grams,
-            max_penalty=script_args.repetition_max_penalty,
+            ngram_size=config.repetition_n_grams,
+            max_penalty=config.repetition_max_penalty,
         ),
         "length": len_reward,
         "code": code_reward,

@@ -532,9 +532,9 @@ async def run_async(scripts: list[str], language: str) -> list[float]:
     return rewards
 
 
-async def run_script(sbx: AsyncSandbox, script: str, language: str) -> float:
-    execution = await sbx.run_code(script, language=language)
-    try:
-        return float(execution.text)
-    except (TypeError, ValueError):
-        return 0.0
+# async def run_script(sbx: AsyncSandbox, script: str, language: str) -> float:
+#     execution = await sbx.run_code(script, language=language)
+#     try:
+#         return float(execution.text)
+#     except (TypeError, ValueError):
+#         return 0.0

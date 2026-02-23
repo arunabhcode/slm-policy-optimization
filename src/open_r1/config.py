@@ -17,6 +17,8 @@ class GSPOConfig:
     dataset_name: str
     dataset_config: str | None
     system_prompt: str
+    trust_remote_code: bool
+    chat_template: str
 
     bf16: bool
     vllm_device: str
