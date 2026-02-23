@@ -1,33 +1,11 @@
 # Open RS
 > Please press ⭐ button if you feel helpful!
 
-This repository hosts the code and datasets for the **Open RS** project, accompanying the paper [*Reinforcement Learning for Reasoning in Small LLMs: What Works and What Doesn’t*](https://arxiv.org/abs/2503.16219). The project explores enhancing reasoning capabilities in small large language models (LLMs) using reinforcement learning (RL) under resource-constrained conditions.
-
-We focus on a 1.5-billion-parameter model, `DeepSeek-R1-Distill-Qwen-1.5B`, trained on 4 NVIDIA A40 GPUs (48 GB VRAM each) within 24 hours. By adapting the Group Relative Policy Optimization (GRPO) algorithm and leveraging a curated, compact mathematical reasoning dataset, we conducted three experiments to assess performance and behavior. Key findings include:
-
-- Significant reasoning improvements, e.g., AMC23 accuracy rising from 63% to 80% and AIME24 reaching 46.7%, outperforming `o1-preview`.
-- Efficient training with just 7,000 samples at a cost of $42, compared to thousands of dollars for baseline models.
-- Challenges like optimization instability and length constraints with extended training.
-
-These results showcase RL-based fine-tuning as a cost-effective approach for small LLMs, making reasoning capabilities accessible in resource-limited settings. We open-source our code, models, and datasets to support further research.
-
-![Performance Metrics](assets/overall.png)
-
-## Resources
-
-### Models
-- [Open-RS1](https://huggingface.co/knoveleng/Open-RS1)
-- [Open-RS2](https://huggingface.co/knoveleng/Open-RS2)
-- [Open-RS3](https://huggingface.co/knoveleng/Open-RS3)
-- Additional models in training: [knoveleng/OpenRS-GRPO](https://huggingface.co/knoveleng/OpenRS-GRPO/commits/main), [quyanh/OpenRS-GRPO](https://huggingface.co/quyanh/OpenRS-GRPO/commits/main)
 
 ### Datasets
 - [open-s1](https://huggingface.co/datasets/knoveleng/open-s1)
 - [open-deepscaler](https://huggingface.co/datasets/knoveleng/open-deepscaler)
 - [open-rs](https://huggingface.co/datasets/knoveleng/open-rs) (used in Experiments 2 and 3)
-
-### Collection
-- [Open-RS Collection](https://huggingface.co/collections/knoveleng/open-rs-67d940abc201a7e7f252ca4e)
 
 ## Installation
 
@@ -38,27 +16,23 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
-Set up a virtual environment with Python 3.11:
+Set up a virtual environment with Python 3.12:
 ```bash
-uv venv openr1 --python 3.11
-source openr1/bin/activate
-uv pip install --upgrade pip
-export UV_LINK_MODE=copy
+uv venv --python 3.12
+source .venv/bin/activate
 ```
 
 ### Dependencies
-Install `vLLM` and `FlashAttention`:
+Install project dependencies with `uv sync`:
 ```bash
-uv pip install vllm==0.7.2
-uv pip install setuptools
-uv pip install flash-attn --no-build-isolation
+uv sync --extra dev
 ```
 
-> **Note**: This installs PyTorch `v2.5.1`, which is required for `vLLM` compatibility. Using a different version may cause issues.
+> **Note**: Ensure your lockfile/environment resolves to a PyTorch version compatible with `vLLM` (the project previously used PyTorch `v2.5.1`).
 
 Install additional dependencies based on your use case:
 ```bash
-GIT_LFS_SKIP_SMUDGE=1 uv pip install -e ".[dev]"
+uv pip install -e ".[dev]"
 ```
 
 ### Authentication
