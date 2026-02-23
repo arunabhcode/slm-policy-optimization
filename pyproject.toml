@@ -9,21 +9,7 @@ description = "Open R1"
 readme = "README.md"
 requires-python = "==3.12"
 license = { text = "Apache-2.0" }
-authors = [
-  { name = "The Hugging Face team (past and future)", email = "lewis@huggingface.co" },
-]
 keywords = ["llm", "inference-time", "compute", "reasoning"]
-classifiers = [
-  "Development Status :: 3 - Alpha",
-  "Intended Audience :: Developers",
-  "Intended Audience :: Education",
-  "Intended Audience :: Science/Research",
-  "License :: OSI Approved :: Apache Software License",
-  "Operating System :: OS Independent",
-  "Programming Language :: Python :: 3",
-  "Programming Language :: Python :: 3.10",
-  "Topic :: Scientific/Engineering :: Artificial Intelligence",
-]
 dependencies = [
   "accelerate==1.4.0",
   "bitsandbytes>=0.43.0",

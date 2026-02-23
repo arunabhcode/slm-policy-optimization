@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import builtins
 import logging
 import os
 import sys
@@ -20,25 +21,31 @@ from dataclasses import dataclass, field
 import datasets
 import torch
 import transformers
+import yaml
 from datasets import load_dataset
 from transformers import set_seed
 from transformers.trainer_utils import get_last_checkpoint
+from gspo import GSPOTrainer
 
-from open_r1.configs import GRPOConfig
-from open_r1.rewards import (
-    accuracy_reward,
-    code_reward,
-    format_reward,
-    get_code_format_reward,
-    get_cosine_scaled_reward,
-    get_repetition_penalty_reward,
-    len_reward,
-    reasoning_steps_reward,
-    tag_count_reward,
-)
-from open_r1.utils import get_tokenizer
-from open_r1.utils.callbacks import get_callbacks
-from open_r1.utils.wandb_logging import init_wandb_training
+# Compatibility shim: rewards.py evaluates `AsyncSandbox` in type annotations at import time.
+if not hasattr(builtins, "AsyncSandbox"):
+    builtins.AsyncSandbox = object  # type: ignore[attr-defined]
+
+# from open_r1.configs import GRPOConfig
+# from open_r1.rewards import (
+#     accuracy_reward,
+#     code_reward,
+#     format_reward,
+#     get_code_format_reward,
+#     get_cosine_scaled_reward,
+#     get_repetition_penalty_reward,
+#     len_reward,
+#     reasoning_steps_reward,
+#     tag_count_reward,
+# )
+# from open_r1.utils import get_tokenizer
+# from open_r1.utils.callbacks import get_callbacks
+# from open_r1.utils.wandb_logging import init_wandb_training
 from trl import GRPOTrainer, ModelConfig, ScriptArguments, TrlParser, get_peft_config
 
 
@@ -99,7 +106,9 @@ class GRPOScriptArguments(ScriptArguments):
     )
     repetition_max_penalty: float = field(
         default=-1.0,
-        metadata={"help": "Maximum (negative) penalty for for repetition penalty reward"},
+        metadata={
+            "help": "Maximum (negative) penalty for for repetition penalty reward"
+        },
     )
     code_language: str = field(
         default="python",
@@ -197,7 +206,9 @@ def main(script_args, training_args, model_args):
 
     logger.info("*** Initializing model kwargs ***")
     torch_dtype = (
-        model_args.torch_dtype if model_args.torch_dtype in ["auto", None] else getattr(torch, model_args.torch_dtype)
+        model_args.torch_dtype
+        if model_args.torch_dtype in ["auto", None]
+        else getattr(torch, model_args.torch_dtype)
     )
     model_kwargs = dict(
         revision=model_args.model_revision,
@@ -216,7 +227,9 @@ def main(script_args, training_args, model_args):
         reward_funcs=reward_funcs,
         args=training_args,
         train_dataset=dataset[script_args.dataset_train_split],
-        eval_dataset=dataset[script_args.dataset_test_split] if training_args.eval_strategy != "no" else None,
+        eval_dataset=dataset[script_args.dataset_test_split]
+        if training_args.eval_strategy != "no"
+        else None,
         peft_config=get_peft_config(model_args),
         callbacks=get_callbacks(training_args, model_args),
         processing_class=tokenizer,
@@ -275,6 +288,10 @@ def main(script_args, training_args, model_args):
 
 
 if __name__ == "__main__":
-    parser = TrlParser((GRPOScriptArguments, GRPOConfig, ModelConfig))
-    script_args, training_args, model_args = parser.parse_args_and_config()
-    main(script_args, training_args, model_args)
+    print("Hello GSPO!")
+    yaml_path = "/home/arunabh/slm-policy-optimization/recipes/gspo.yaml"
+    # yaml_path = sys.argv[1]
+    with open(yaml_path, "r", encoding="utf-8") as f:
+        print(f"Loading config from {yaml_path}")
+        config = yaml.safe_load(f) or {}
+    print(f"Config: {config}")
