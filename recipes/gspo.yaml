@@ -6,6 +6,7 @@ attn_implementation: flash_attention_2
 
 # Data training arguments
 dataset_name: knoveleng/open-rs
+dataset_config: null
 system_prompt: "A conversation between User and Assistant. The user asks a question, and the Assistant solves it. The assistant first thinks about the reasoning process in the mind and then provides the user with the answer, and put your final answer within \\boxed{{}} . The reasoning process and answer are enclosed within <think> </think> and <answer> </answer> tags, respectively, i.e., <think> reasoning process here </think> <answer> answer here </answer>. Note that respond by English, NOT use other languages."
 
 # GRPO trainer config
@@ -50,3 +51,14 @@ save_steps: 50
 seed: 42
 temperature: 0.7
 warmup_ratio: 0.1
+resume_from_checkpoint: true
+dataset_train_split: train
+
+cosine_min_value_wrong: 0.0
+cosine_max_value_wrong: -0.5
+cosine_min_value_correct: 0.5
+cosine_max_value_correct: 1.0
+cosine_max_len: 1000
+repetition_n_grams: 3
+repetition_max_penalty: -1.0
+code_language: python

@@ -9,14 +9,14 @@ from typing import Dict
 from latex2sympy2_extended import NormalizationConfig
 from math_verify import LatexExtractionConfig, parse, verify
 
-from .utils import is_e2b_available
+# from .utils import is_e2b_available
 
 
-if is_e2b_available():
-    from dotenv import load_dotenv
-    from e2b_code_interpreter import AsyncSandbox
+# if is_e2b_available():
+#     from dotenv import load_dotenv
+#     from e2b_code_interpreter import AsyncSandbox
 
-    load_dotenv()
+#     load_dotenv()
 
 
 def accuracy_reward(completions, solution, **kwargs):
@@ -69,7 +69,7 @@ def accuracy_reward(completions, solution, **kwargs):
 
 def format_reward(completions, **kwargs):
     """Reward function that checks if the reasoning process is enclosed within <think> and </think> tags, while the final answer is enclosed within <answer> and </answer> tags."""
-    
+
     def count_tags(text: str) -> float:
         count = 0.0
         # We only count </think> tag, because <think> tag is available in system prompt
@@ -108,10 +108,10 @@ def tag_count_reward(completions, **kwargs) -> list[float]:
 #         """
 #         Checks if the given text contains languages other than English.
 #         Ignores LaTeX notation.
-        
+
 #         Args:
 #             text (str): The text to analyze
-            
+
 #         Returns:
 #             bool: False if the text is in English (with LaTeX allowed),
 #                 True if it contains non-English languages
@@ -119,20 +119,20 @@ def tag_count_reward(completions, **kwargs) -> list[float]:
 #         # Skip if empty
 #         if not text or text.strip() == "":
 #             return False
-        
+
 #         # First, remove LaTeX notation to avoid false positives
 #         # This pattern matches typical LaTeX structures like $...$ or \begin{...}...\end{...}
 #         latex_pattern = r'\$[^$]*\$|\\\(.*?\\\)|\\\[.*?\\\]|\\begin\{.*?\}.*?\\end\{.*?\}'
 #         text_without_latex = re.sub(latex_pattern, '', text, flags=re.DOTALL)
-        
+
 #         # Also remove common LaTeX commands
 #         latex_commands = r'\\[a-zA-Z]+((\{[^{}]*\})?|(\[[^\[\]]*\])?)+'
 #         text_without_latex = re.sub(latex_commands, '', text_without_latex)
-        
+
 #         # Check if we have non-ASCII characters that are not typical in English text
 #         # First, normalize unicode characters
 #         normalized_text = unicodedata.normalize('NFKD', text_without_latex)
-        
+
 #         # Common non-English character sets (excluding common punctuation and symbols)
 #         non_english_patterns = [
 #             # Cyrillic characters
@@ -148,16 +148,16 @@ def tag_count_reward(completions, **kwargs) -> list[float]:
 #             # Greek characters
 #             r'[\u0370-\u03FF]',
 #         ]
-        
+
 #         for pattern in non_english_patterns:
 #             if re.search(pattern, normalized_text):
 #                 return True
-        
+
 #         # If no obvious non-English characters found, try language detection
 #         # Clean text further - remove URLs, numbers, punctuation
 #         cleaned_text = re.sub(r'http\S+|www\S+|\d+|[^\w\s]', ' ', text_without_latex)
 #         cleaned_text = ' '.join(cleaned_text.split())
-        
+
 #         # Only perform language detection if we have enough text
 #         if len(cleaned_text.split()) >= 5:
 #             try:
@@ -166,7 +166,7 @@ def tag_count_reward(completions, **kwargs) -> list[float]:
 #             except LangDetectException:
 #                 # If detection fails, rely on character-based detection above
 #                 pass
-        
+
 #         # Default to assuming it's English
 #         return False
 
@@ -191,7 +191,9 @@ def reasoning_steps_reward(completions, **kwargs):
     return [min(1.0, count / 3) for count in matches]
 
 
-def len_reward(completions: list[Dict[str, str]], solution: list[str], **kwargs) -> float:
+def len_reward(
+    completions: list[Dict[str, str]], solution: list[str], **kwargs
+) -> float:
     """Compute length-based rewards to discourage overthinking and promote token efficiency.
 
     Taken from the Kimi 1.5 tech report: https://arxiv.org/abs/2501.12599
@@ -292,7 +294,11 @@ def get_cosine_scaled_reward(
         rewards = []
 
         for content, sol in zip(contents, solution):
-            gold_parsed = parse(sol, extraction_mode="first_match", extraction_config=[LatexExtractionConfig()])
+            gold_parsed = parse(
+                sol,
+                extraction_mode="first_match",
+                extraction_config=[LatexExtractionConfig()],
+            )
             if len(gold_parsed) == 0:
                 rewards.append(1.0)  # Skip unparseable examples
                 print("Failed to parse gold solution: ", sol)
@@ -448,17 +454,23 @@ def code_reward(completions, **kwargs) -> list[float]:
 
     evaluate_code(code_snippet, test_cases)
     """
-    code_snippets = [extract_code(completion[-1]["content"]) for completion in completions]
+    code_snippets = [
+        extract_code(completion[-1]["content"]) for completion in completions
+    ]
     verification_info = kwargs["verification_info"]
     scripts = [
-        evaluation_script_template.format(code=json.dumps(code), test_cases=json.dumps(json.dumps(info["test_cases"])))
+        evaluation_script_template.format(
+            code=json.dumps(code), test_cases=json.dumps(json.dumps(info["test_cases"]))
+        )
         for code, info in zip(code_snippets, verification_info)
     ]
 
     language = verification_info[0]["language"]
 
     if not all(v["language"] == language for v in verification_info):
-        raise ValueError("All verification_info must have the same language", verification_info)
+        raise ValueError(
+            "All verification_info must have the same language", verification_info
+        )
     try:
         rewards = run_async_from_sync(scripts, language)
 
@@ -475,11 +487,16 @@ def get_code_format_reward(language: str = "python"):
     Args:
         language: Programming language supported by E2B https://e2b.dev/docs/code-interpreting/supported-languages
     """
-    pattern = rf"^<think>\n.*?\n</think>\n<answer>\n.*?```{language}.*?```.*?\n</answer>$"
+    pattern = (
+        rf"^<think>\n.*?\n</think>\n<answer>\n.*?```{language}.*?```.*?\n</answer>$"
+    )
 
     def code_format_reward(completions, **kwargs):
         completion_contents = [completion[0]["content"] for completion in completions]
-        matches = [re.match(pattern, content, re.DOTALL | re.MULTILINE) for content in completion_contents]
+        matches = [
+            re.match(pattern, content, re.DOTALL | re.MULTILINE)
+            for content in completion_contents
+        ]
         return [1.0 if match else 0.0 for match in matches]
 
     return code_format_reward
