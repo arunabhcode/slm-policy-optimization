@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import builtins
 import logging
 import os
 import sys
@@ -24,6 +23,7 @@ from datasets import load_dataset
 from transformers import set_seed
 from transformers.trainer_utils import get_last_checkpoint
 from gspo import GSPOTrainer
+import pprint
 
 from open_r1.rewards import (
     accuracy_reward,
@@ -39,8 +39,6 @@ from open_r1.rewards import (
 
 from open_r1.config import GSPOConfig
 from open_r1.utils.model_utils import get_tokenizer
-# from open_r1.utils.callbacks import get_callbacks
-# from open_r1.utils.wandb_logging import init_wandb_training
 
 
 logger = logging.getLogger(__name__)
@@ -66,7 +64,7 @@ def main(config):
     transformers.utils.logging.enable_explicit_format()
 
     # Log on each process a small summary
-    logger.info(f"Config parameters {config}")
+    # logger.info(f"Config parameters {config}")
 
     # Check for last checkpoint
     last_checkpoint = None
@@ -80,7 +78,7 @@ def main(config):
 
     # Load the dataset
     dataset = load_dataset(config.dataset_name, name=config.dataset_config)
-
+    print(type(dataset))
     ################
     # Load tokenizer
     ################
@@ -124,17 +122,36 @@ def main(config):
     for split in dataset:
         if "messages" in dataset[split].column_names:
             dataset[split] = dataset[split].remove_columns("messages")
+    # print(dataset.keys())
+    print(pprint.pprint(dataset["train"][0]))
+    # print(type(dataset["train"]))
+    # print(type(dataset["train"][0]))
+    # print(dataset["train"][0].keys())
 
     logger.info("*** Initializing model kwargs ***")
+    exit(0)
 
     #############################
     # Initialize the GRPO trainer
     #############################
     trainer = GSPOTrainer(
         config=config,
+        train_dataset=dataset[config.dataset_train_split],
+        tokenizer=tokenizer,
+        reward_funcs=reward_funcs,
+        weights=config.reward_weights,
     )
-    print("Trainer dict:", trainer.__dict__)
-    exit(0)
+
+    # Test vLLM generation with a sample prompt
+    # if config.do_eval:
+    #     print("\n*** Testing vLLM generation ***")
+    #     sample_prompts = dataset[config.dataset_train_split]["prompt"][:2]
+    #     rollout_results = trainer.generate_rollouts(sample_prompts)
+    #     print(f"Generated {len(rollout_results['completions'])} completions")
+    #     print(f"Sample completion: {rollout_results['completions'][0][:200]}...")
+
+    # print("Trainer dict:", trainer.__dict__.keys())
+    # exit(0)
     ###############
     # Training loop
     ###############
@@ -181,7 +198,6 @@ def main(config):
 
 
 if __name__ == "__main__":
-    print("Hello GSPO!")
     yaml_path = "/home/arunabh/slm-policy-optimization/recipes/gspo.yaml"
     # yaml_path = sys.argv[1]
     GSPOConfig = GSPOConfig.from_yaml(yaml_path)
