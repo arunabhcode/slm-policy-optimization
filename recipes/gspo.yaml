@@ -13,10 +13,21 @@ chat_template: "{% for message in messages %}\n{% if message['role'] == 'user' %
 
 # GRPO trainer config
 bf16: true
+###############################################
+#############VLLM Parameters###################
+###############################################
 vllm_device: auto
 vllm_enforce_eager: true
 vllm_gpu_memory_utilization: 0.7
 vllm_max_model_len: 4608
+vllm_mode: server # "server" or "colocate"
+vllm_tensor_parallel_size: 1
+use_vllm: true
+# vllm_server_host: localhost
+# vllm_server_port: 8000
+###############################################
+#############Training Arguments################
+###############################################
 do_eval: false
 gradient_accumulation_steps: 4
 gradient_checkpointing: true

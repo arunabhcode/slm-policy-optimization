@@ -4,8 +4,10 @@
 from tqdm import tqdm
 
 from vllm import LLM, SamplingParams
-from transformers import AutoTokenizer
+from transformers import AutoModelForCausalLM
 import torch
+import numpy as np
+import copy
 
 from open_r1.utils.model_utils import get_tokenizer
 
@@ -87,6 +89,8 @@ class GSPOTrainer:
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.model.to(self.device)
         self.model.train()
+        self.ref_model = copy.deepcopy(self.model)
+        self.ref_model.eval()
 
     def init_optimizer(self):
         """Initialize optimizer and learning rate scheduler"""
@@ -99,7 +103,7 @@ class GSPOTrainer:
         )
 
         # Initialize optimizer
-        self.optimizer = AdamW(
+        self.optimizer = torch.optim.AdamW(
             self.model.parameters(),
             lr=self.config.learning_rate,
             betas=(0.9, 0.999),
@@ -108,7 +112,7 @@ class GSPOTrainer:
 
         # Initialize scheduler
         num_warmup_steps = int(total_steps * self.config.warmup_ratio)
-        self.scheduler = get_scheduler(
+        self.scheduler = torch.optim.get_scheduler(
             name=self.config.lr_scheduler_type,
             optimizer=self.optimizer,
             num_warmup_steps=num_warmup_steps,
@@ -119,6 +123,9 @@ class GSPOTrainer:
         print(
             f"Optimizer initialized: {total_steps} total steps, {num_warmup_steps} warmup steps"
         )
+
+    def pytorch_to_vllm_weights(self):
+        pass
 
     def generate_rollouts(self, prompts):
         """
@@ -132,9 +139,7 @@ class GSPOTrainer:
             logprobs=1,  # Return logprobs for importance sampling
         )
 
-        # Apply chat template if prompts are conversations
         if isinstance(prompts[0], list):
-            # Prompts are in conversation format
             formatted_prompts = [
                 self.tokenizer.apply_chat_template(
                     prompt, tokenize=False, add_generation_prompt=True
@@ -144,7 +149,6 @@ class GSPOTrainer:
         else:
             formatted_prompts = prompts
 
-        # Generate with vLLM
         outputs = self.llm.generate(
             formatted_prompts, sampling_params=sampling_params, use_tqdm=False
         )
@@ -153,22 +157,24 @@ class GSPOTrainer:
         all_completions = []
         all_completion_ids = []
         all_logprobs = []
+        all_prompts = []
 
-        for output in outputs:
+        for idx, output in enumerate(outputs):
             for completion_output in output.outputs:
                 all_completions.append(completion_output.text)
                 all_completion_ids.append(completion_output.token_ids)
                 all_logprobs.append(completion_output.logprobs)
+                all_prompts.append(formatted_prompts[idx])
 
         return {
             "completions": all_completions,
             "completion_ids": all_completion_ids,
             "logprobs": all_logprobs,
-            "prompts": formatted_prompts,
+            "prompts": all_prompts,
         }
 
     def compute_rewards(self, rollouts, completions):
-        total_rewards = np.zeros(len(formatted_completions))
+        total_rewards = np.zeros(len(completions))
         total_rewards = torch.zeros(len(completions))
 
         for func, weight in zip(self.reward_funcs, self.reward_weights):
@@ -180,13 +186,6 @@ class GSPOTrainer:
             total_rewards += weight * np.array(func_rewards)
 
         return total_rewards.tolist()
-
-        """Run all reward functions and sum their scores."""
-        for func in self.reward_funcs:
-            # Assuming reward function returns a list/tensor of floats
-            scores = func(prompts, completions)
-            total_rewards += torch.tensor(scores, dtype=torch.float32)
-        return total_rewards
 
     def compute_advantages(self, rewards, num_generations):
         """
@@ -203,50 +202,96 @@ class GSPOTrainer:
         Compute the policy gradient loss for GRPO.
         """
         # Get completion token IDs and convert to tensors
+
+        old_seq_log_probs_list = []
+        ref_seq_log_probs_list = []
+        valid_masks_list = []
+        inputs_list = []
+
+        prompt_ids = self.tokenizer(
+            rollouts["prompts"],
+            return_tensors="pt",
+            padding=False,
+            add_special_tokens=False,
+        )
+
         completion_ids = [
             torch.tensor(ids, dtype=torch.long) for ids in rollouts["completion_ids"]
         ]
 
         # Pad sequences to same length
-        max_len = max(len(ids) for ids in completion_ids)
-        padded_ids = torch.zeros(len(completion_ids), max_len, dtype=torch.long)
-        attention_mask = torch.zeros(len(completion_ids), max_len, dtype=torch.long)
-
-        for i, ids in enumerate(completion_ids):
-            padded_ids[i, : len(ids)] = ids
-            attention_mask[i, : len(ids)] = 1
-
-        # Move to device
-        padded_ids = padded_ids.to(self.device)
-        attention_mask = attention_mask.to(self.device)
-        advantages_tensor = torch.tensor(advantages, dtype=torch.float32).to(
-            self.device
+        max_len = max(
+            (len(pids) + len(cids)) for pids, cids in zip(prompt_ids, completion_ids)
         )
 
-        # Forward pass through policy model
-        outputs = self.model(input_ids=padded_ids, attention_mask=attention_mask)
-        logits = outputs.logits[:, :-1, :]  # Shift for next token prediction
+        padded_ids = torch.zeros(batch_size, max_len, dtype=torch.long)
+        attention_mask = torch.zeros(batch_size, max_len, dtype=torch.long)
+        action_mask = torch.zeros(
+            batch_size, max_len - 1, dtype=torch.long
+        )  # -1 for shifted logits
+        seq_lengths = torch.zeros(batch_size, dtype=torch.float32)
 
-        # Compute log probabilities
-        log_probs = F.log_softmax(logits, dim=-1)
+        for i in range(batch_size):
+            # Concatenate prompt and completion
+            conversation = torch.cat([prompt_ids[i], completion_ids[i]])
+            seq_len = len(conversation)
+            prompt_len = len(prompt_ids[i])
 
-        # Get log probs of actual tokens
-        target_ids = padded_ids[:, 1:]  # Shift targets
-        target_log_probs = torch.gather(
-            log_probs, dim=-1, index=target_ids.unsqueeze(-1)
-        ).squeeze(-1)
+            padded_ids[i, :seq_len] = conversation
+            attention_mask[i, :seq_len] = 1
 
-        # Mask padding tokens
-        mask = attention_mask[:, 1:].float()
-        target_log_probs = target_log_probs * mask
+            # Action mask: 1 for completion tokens, 0 for prompt and padding
+            action_mask[i, prompt_len - 1 : seq_len - 1] = 1
+            seq_lengths[i] = len(
+                completion_ids[i]
+            )  # Length of the generated completion
 
-        # Sum log probs per sequence
-        sequence_log_probs = target_log_probs.sum(dim=-1)
+        # Move tensors to device
+        padded_ids = padded_ids.to(self.device)
+        attention_mask = attention_mask.to(self.device)
+        action_mask = action_mask.to(self.device)
+        seq_lengths = seq_lengths.to(self.device)
+        advantages_tensor = torch.tensor(
+            advantages, dtype=torch.float32, device=self.device
+        )
 
-        # Policy gradient loss: -advantages * log_probs
-        loss = -(advantages_tensor * sequence_log_probs).mean()
+        # 1. Get current policy log probabilities
+        logits = self.model(input_ids=padded_ids, attention_mask=attention_mask).logits
+        log_probs = self._get_per_token_logps(logits, padded_ids)
 
-        return loss
+        # 2. Get reference policy log probabilities
+        with torch.no_grad():
+            ref_logits = self.ref_model(
+                input_ids=padded_ids, attention_mask=attention_mask
+            ).logits
+            ref_log_probs = self._get_per_token_logps(ref_logits, padded_ids)
+
+        # 3. Calculate Sequence-level log probabilities
+        # Sum log probs over completion tokens only, then divide by completion length
+        seq_log_probs = (log_probs * action_mask).sum(dim=1) / seq_lengths
+        ref_seq_log_probs = (ref_log_probs * action_mask).sum(dim=1) / seq_lengths
+
+        # For a single forward pass per rollout, old_seq_log_probs is the detached current seq_log_probs
+        old_seq_log_probs = seq_log_probs.detach()
+
+        # 4. Calculate GSPO Surrogate Loss (Sequence level)
+        seq_ratio = torch.exp(seq_log_probs - old_seq_log_probs)
+
+        surr1 = seq_ratio * advantages_tensor
+        surr2 = torch.clamp(seq_ratio, 1.0 - epsilon, 1.0 + epsilon) * advantages_tensor
+        policy_loss = -torch.min(surr1, surr2)
+
+        # 5. Calculate Sequence-level KL divergence penalty
+        seq_kl = (
+            torch.exp(ref_seq_log_probs - seq_log_probs)
+            - (ref_seq_log_probs - seq_log_probs)
+            - 1.0
+        )
+
+        # 6. Combine losses and average over the batch
+        combined_loss = (policy_loss + beta * seq_kl).mean()
+
+        return combined_loss
 
     def train(self, resume_from_checkpoint=None):
         """
@@ -303,6 +348,8 @@ class GSPOTrainer:
                     self.optimizer.step()
                     self.scheduler.step()
                     self.optimizer.zero_grad()
+
+                    self.pytorch_to_vllm_weights()
 
                     self.global_step += 1
 

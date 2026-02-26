@@ -122,14 +122,8 @@ def main(config):
     for split in dataset:
         if "messages" in dataset[split].column_names:
             dataset[split] = dataset[split].remove_columns("messages")
-    # print(dataset.keys())
-    print(pprint.pprint(dataset["train"][0]))
-    # print(type(dataset["train"]))
-    # print(type(dataset["train"][0]))
-    # print(dataset["train"][0].keys())
 
     logger.info("*** Initializing model kwargs ***")
-    exit(0)
 
     #############################
     # Initialize the GRPO trainer
