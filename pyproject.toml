@@ -19,6 +19,7 @@ dependencies = [
   "e2b-code-interpreter>=1.0.5",
   "einops>=0.8.0",
   "flake8>=6.0.0",
+  "flash-attn>=2.7.0",
   "hf_transfer>=0.1.4",
   "huggingface-hub[cli]>=0.19.2,<1.0",
   "isort>=5.12.0",
