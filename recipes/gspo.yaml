@@ -11,7 +11,6 @@ system_prompt: "A conversation between User and Assistant. The user asks a quest
 trust_remote_code: true
 chat_template: "{% for message in messages %}\n{% if message['role'] == 'user' %}\n{{ '<|user|>\n' + message['content'] + eos_token }}\n{% elif message['role'] == 'system' %}\n{{ '<|system|>\n' + message['content'] + eos_token }}\n{% elif message['role'] == 'assistant' %}\n{{ '<|assistant|>\n'  + message['content'] + eos_token }}\n{% endif %}\n{% if loop.last and add_generation_prompt %}\n{{ '<|assistant|>' }}\n{% endif %}\n{% endfor %}"
 
-# GRPO trainer config
 bf16: true
 ###############################################
 #############VLLM Parameters###################
@@ -59,6 +58,9 @@ reward_funcs:
 reward_weights:
   - 1.0
   - 2.0
+epsilon: 0.2
+beta: 0.04
+
 save_strategy: "steps"
 save_steps: 50
 seed: 42

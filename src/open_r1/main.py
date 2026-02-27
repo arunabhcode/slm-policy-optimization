@@ -17,13 +17,11 @@ import os
 import sys
 
 import datasets
-import torch
 import transformers
 from datasets import load_dataset
 from transformers import set_seed
 from transformers.trainer_utils import get_last_checkpoint
 from gspo import GSPOTrainer
-import pprint
 
 from open_r1.rewards import (
     accuracy_reward,
@@ -133,19 +131,9 @@ def main(config):
         train_dataset=dataset[config.dataset_train_split],
         tokenizer=tokenizer,
         reward_funcs=reward_funcs,
-        weights=config.reward_weights,
+        reward_weights=config.reward_weights,
     )
 
-    # Test vLLM generation with a sample prompt
-    # if config.do_eval:
-    #     print("\n*** Testing vLLM generation ***")
-    #     sample_prompts = dataset[config.dataset_train_split]["prompt"][:2]
-    #     rollout_results = trainer.generate_rollouts(sample_prompts)
-    #     print(f"Generated {len(rollout_results['completions'])} completions")
-    #     print(f"Sample completion: {rollout_results['completions'][0][:200]}...")
-
-    # print("Trainer dict:", trainer.__dict__.keys())
-    # exit(0)
     ###############
     # Training loop
     ###############
@@ -169,13 +157,7 @@ def main(config):
     trainer.save_model(config.output_dir)
     logger.info(f"Model saved to {config.output_dir}")
 
-    # Save everything else on main process
-    kwargs = {
-        "dataset_name": config.dataset_name,
-        "tags": ["open-r1"],
-    }
     if trainer.accelerator.is_main_process:
-        trainer.create_model_card(**kwargs)
         # Restore k,v cache for fast inference
         trainer.model.config.use_cache = True
         trainer.model.config.save_pretrained(config.output_dir)

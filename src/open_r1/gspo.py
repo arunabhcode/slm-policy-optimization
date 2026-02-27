@@ -8,6 +8,9 @@ from transformers import AutoModelForCausalLM
 import torch
 import numpy as np
 import copy
+import os
+import json
+import transformers
 
 from open_r1.utils.model_utils import get_tokenizer
 
@@ -17,12 +20,14 @@ class GSPOTrainer:
         self,
         config,
         train_dataset=None,
+        eval_dataset=None,
         tokenizer=None,
         reward_funcs=None,
         reward_weights=None,
     ):
         self.config = config
         self.train_dataset = train_dataset
+        self.eval_dataset = eval_dataset
         self.tokenizer = tokenizer
         self.reward_funcs = reward_funcs
         self.reward_weights = (
@@ -60,12 +65,7 @@ class GSPOTrainer:
             gpu_memory_utilization=self.config.vllm_gpu_memory_utilization,
             max_model_len=self.config.vllm_max_model_len,
             enforce_eager=self.config.vllm_enforce_eager,
-            # For colocated mode, use external launcher
-            # distributed_executor_backend="external_launcher",
         )
-
-        # Load tokenizer if not provided
-        self.tokenizer = get_tokenizer(self.config)
 
     def init_policy_model(self):
         """Initialize the policy model for training"""
@@ -112,12 +112,12 @@ class GSPOTrainer:
 
         # Initialize scheduler
         num_warmup_steps = int(total_steps * self.config.warmup_ratio)
-        self.scheduler = torch.optim.get_scheduler(
+        self.scheduler = transformers.get_scheduler(
             name=self.config.lr_scheduler_type,
             optimizer=self.optimizer,
             num_warmup_steps=num_warmup_steps,
             num_training_steps=total_steps,
-            scheduler_specific_kwargs=self.config.lr_scheduler_kwargs,
+            **self.config.lr_scheduler_kwargs,
         )
 
         print(
@@ -125,7 +125,14 @@ class GSPOTrainer:
         )
 
     def pytorch_to_vllm_weights(self):
-        pass
+        """Resync pytorch weights back to VLLM"""
+        with torch.no_grad():
+            model_weights = self.model.named_parameters()
+
+            vllm_model = (
+                self.llm.llm_engine.model_executor.driver_worker.model_runner.model
+            )
+            vllm_model.load_weights(model_weights)
 
     def generate_rollouts(self, prompts):
         """
@@ -173,12 +180,13 @@ class GSPOTrainer:
             "prompts": all_prompts,
         }
 
-    def compute_rewards(self, rollouts, completions):
+    def compute_rewards(self, completions, solutions):
+        """Compute rewards for each completion using the configured reward functions"""
         total_rewards = np.zeros(len(completions))
-        total_rewards = torch.zeros(len(completions))
-
+        formatted_completions = [
+            [{"role": "assistant", "content": c}] for c in completions
+        ]
         for func, weight in zip(self.reward_funcs, self.reward_weights):
-            # Call reward function with appropriate kwargs
             func_rewards = func(
                 completions=formatted_completions,
                 solution=solutions,
@@ -208,16 +216,19 @@ class GSPOTrainer:
         valid_masks_list = []
         inputs_list = []
 
-        prompt_ids = self.tokenizer(
-            rollouts["prompts"],
-            return_tensors="pt",
-            padding=False,
-            add_special_tokens=False,
-        )
+        prompt_ids = [
+            self.tokenizer(
+                p, return_tensors="pt", padding=False, add_special_tokens=False
+            ).input_ids.squeeze(0)
+            for p in rollouts["prompts"]
+        ]
 
         completion_ids = [
             torch.tensor(ids, dtype=torch.long) for ids in rollouts["completion_ids"]
         ]
+
+        # Get batch size from the number of completions
+        batch_size = len(completion_ids)
 
         # Pad sequences to same length
         max_len = max(
@@ -257,14 +268,14 @@ class GSPOTrainer:
 
         # 1. Get current policy log probabilities
         logits = self.model(input_ids=padded_ids, attention_mask=attention_mask).logits
-        log_probs = self._get_per_token_logps(logits, padded_ids)
+        log_probs = self.get_logprobs(logits, padded_ids)
 
         # 2. Get reference policy log probabilities
         with torch.no_grad():
             ref_logits = self.ref_model(
                 input_ids=padded_ids, attention_mask=attention_mask
             ).logits
-            ref_log_probs = self._get_per_token_logps(ref_logits, padded_ids)
+            ref_log_probs = self.get_logprobs(ref_logits, padded_ids)
 
         # 3. Calculate Sequence-level log probabilities
         # Sum log probs over completion tokens only, then divide by completion length
@@ -278,7 +289,10 @@ class GSPOTrainer:
         seq_ratio = torch.exp(seq_log_probs - old_seq_log_probs)
 
         surr1 = seq_ratio * advantages_tensor
-        surr2 = torch.clamp(seq_ratio, 1.0 - epsilon, 1.0 + epsilon) * advantages_tensor
+        surr2 = (
+            torch.clamp(seq_ratio, 1.0 - self.config.epsilon, 1.0 + self.config.epsilon)
+            * advantages_tensor
+        )
         policy_loss = -torch.min(surr1, surr2)
 
         # 5. Calculate Sequence-level KL divergence penalty
@@ -289,7 +303,7 @@ class GSPOTrainer:
         )
 
         # 6. Combine losses and average over the batch
-        combined_loss = (policy_loss + beta * seq_kl).mean()
+        combined_loss = (policy_loss + self.config.beta * seq_kl).mean()
 
         return combined_loss
 
@@ -300,6 +314,26 @@ class GSPOTrainer:
         if not len(self.train_dataset):
             raise ValueError("train_dataset has length 0")
 
+        # Resume from checkpoint if specified
+        if resume_from_checkpoint is not None:
+            state_path = os.path.join(resume_from_checkpoint, "trainer_state.pt")
+            if os.path.exists(state_path):
+                print(f"Resuming from checkpoint: {resume_from_checkpoint}")
+                state = torch.load(state_path, map_location=self.device)
+                self.optimizer.load_state_dict(state["optimizer"])
+                self.scheduler.load_state_dict(state["scheduler"])
+                self.global_step = state["global_step"]
+                self.epoch = state.get("epoch", 0)
+
+                self.model = AutoModelForCausalLM.from_pretrained(
+                    resume_from_checkpoint,
+                    torch_dtype=getattr(torch, self.config.torch_dtype),
+                    attn_implementation=self.config.attn_implementation,
+                ).to(self.device)
+                self.model.train()
+                self.pytorch_to_vllm_weights()
+                print(f"Resumed at step {self.global_step}")
+
         print(f"Starting training for {self.config.num_train_epochs} epochs")
         print(f"Max steps: {self.config.max_steps}")
         print(f"Batch size: {self.config.per_device_train_batch_size}")
@@ -309,6 +343,7 @@ class GSPOTrainer:
         total_loss = 0.0
 
         for epoch in range(self.config.num_train_epochs):
+            self.epoch = epoch
             print(f"Epoch {epoch+1}/{self.config.num_train_epochs}")
 
             epoch_iterator = tqdm(self.dataloader, desc=f"Epoch {epoch+1}")
@@ -319,10 +354,14 @@ class GSPOTrainer:
                 with torch.no_grad():
                     rollouts = self.generate_rollouts(prompts)
 
+                solutions = [
+                    sol
+                    for sol in batch["solution"]
+                    for _ in range(self.config.num_generations)
+                ]
+
                 # 2. Compute rewards
-                rewards = self.compute_rewards(
-                    rollouts["prompts"], rollouts["completions"]
-                )
+                rewards = self.compute_rewards(rollouts["completions"], solutions)
 
                 # 3. Calculate advantages using group normalization
                 advantages = self.compute_advantages(
@@ -355,7 +394,10 @@ class GSPOTrainer:
 
                     # Logging
                     if self.global_step % self.config.logging_steps == 0:
-                        avg_loss = total_loss / self.config.logging_steps
+                        avg_loss = total_loss / (
+                            self.config.logging_steps
+                            * self.config.gradient_accumulation_steps
+                        )
                         avg_reward = np.mean(rewards)
                         lr = self.scheduler.get_last_lr()[0]
 
@@ -371,9 +413,8 @@ class GSPOTrainer:
                             self.config.log_completions
                             and self.global_step % (self.config.logging_steps * 10) == 0
                         ):
-                            print(f"\n--- Sample completion ---")
                             print(f"Prompt: {prompts[0]}")
-                            print(f"Completion: {rollouts['completions'][0][:200]}...")
+                            print(f"Completion: {rollouts['completions'][0][:200]}")
                             print(f"Reward: {rewards[0]:.4f}")
 
                         total_loss = 0.0
@@ -385,6 +426,9 @@ class GSPOTrainer:
                 if self.global_step >= self.config.max_steps:
                     break
 
+            if self.global_step >= self.config.max_steps:
+                break
+
         metrics = {
             "train_loss": total_loss,
             "final_step": self.global_step,
@@ -393,47 +437,78 @@ class GSPOTrainer:
         return type("TrainOutput", (), {"metrics": metrics})()
 
     def save_checkpoint(self):
-        """Save model checkpoint"""
-        # checkpoint_dir = os.path.join(
-        #     self.config.output_dir, f"checkpoint-{self.global_step}"
-        # )
-        # os.makedirs(checkpoint_dir, exist_ok=True)
+        """Save model checkpoint."""
+        checkpoint_dir = os.path.join(
+            self.config.output_dir, f"checkpoint-{self.global_step}"
+        )
+        os.makedirs(checkpoint_dir, exist_ok=True)
 
-        # print(f"\nSaving checkpoint to {checkpoint_dir}")
-        # self.model.save_pretrained(checkpoint_dir)
-        # self.tokenizer.save_pretrained(checkpoint_dir)
+        print(f"\nSaving checkpoint to {checkpoint_dir}")
+        self.model.save_pretrained(checkpoint_dir)
+        self.tokenizer.save_pretrained(checkpoint_dir)
 
-        # # Save optimizer and scheduler state
-        # torch.save(
-        #     {
-        #         "optimizer": self.optimizer.state_dict(),
-        #         "scheduler": self.scheduler.state_dict(),
-        #         "global_step": self.global_step,
-        #         "epoch": self.epoch,
-        #     },
-        #     os.path.join(checkpoint_dir, "trainer_state.pt"),
-        # )
+        # Save optimizer and scheduler state
+        torch.save(
+            {
+                "optimizer": self.optimizer.state_dict(),
+                "scheduler": self.scheduler.state_dict(),
+                "global_step": self.global_step,
+                "epoch": self.epoch,
+            },
+            os.path.join(checkpoint_dir, "trainer_state.pt"),
+        )
 
     def evaluate(self):
-        # TODO
-        return {}
+        """Evaluate the model on eval_dataset by generating completions and computing rewards."""
 
-    def save_model(self, output_dir=None):
+        eval_dataloader = torch.utils.data.DataLoader(
+            self.eval_dataset,
+            batch_size=self.config.per_device_eval_batch_size,
+            shuffle=False,
+        )
+
+        all_rewards = []
+        all_completions = []
+
+        self.model.eval()
+        with torch.no_grad():
+            for batch in tqdm(eval_dataloader, desc="Evaluating"):
+                prompts = batch["prompt"]
+                rollouts = self.generate_rollouts(prompts)
+
+                solutions = [
+                    sol
+                    for sol in batch["solution"]
+                    for _ in range(self.config.num_generations)
+                ]
+
+                rewards = self.compute_rewards(rollouts["completions"], solutions)
+                all_rewards.extend(rewards)
+                all_completions.extend(rollouts["completions"])
+
+        metrics = {
+            "eval_reward_mean": float(np.mean(all_rewards)),
+            "eval_reward_std": float(np.std(all_rewards)),
+            "eval_reward_min": float(np.min(all_rewards)),
+            "eval_reward_max": float(np.max(all_rewards)),
+            "eval_num_samples": len(all_rewards),
+        }
+
+        return metrics
+
+    def save_model(self):
         """Save the final trained model"""
-        save_dir = output_dir or self.config.output_dir
-        os.makedirs(save_dir, exist_ok=True)
+        os.makedirs(self.config.output_dir, exist_ok=True)
 
-        print(f"Saving final model to {save_dir}")
-        self.model.save_pretrained(save_dir)
-        self.tokenizer.save_pretrained(save_dir)
-
-        # Save config
-        import json
+        print(f"Saving final model to {self.config.output_dir}")
+        self.model.save_pretrained(self.config.output_dir)
 
         config_dict = {
             k: v for k, v in self.config.__dict__.items() if not k.startswith("_")
         }
-        with open(os.path.join(save_dir, "training_config.json"), "w") as f:
+        with open(
+            os.path.join(self.config.output_dir, "training_config.json"), "w"
+        ) as f:
             json.dump(config_dict, f, indent=2, default=str)
 
     def log_metrics(self, split, metrics):
@@ -443,4 +518,40 @@ class GSPOTrainer:
         pass
 
     def save_state(self):
-        pass
+        """Save full trainer state (optimizer, scheduler, step) for checkpoint resumption."""
+        os.makedirs(self.config.output_dir, exist_ok=True)
+        state_path = os.path.join(self.config.output_dir, "trainer_state.pt")
+
+        torch.save(
+            {
+                "global_step": self.global_step,
+                "epoch": self.epoch,
+                "optimizer": self.optimizer.state_dict(),
+                "scheduler": self.scheduler.state_dict(),
+            },
+            state_path,
+        )
+        print(f"Trainer state saved to {state_path}")
+
+    def get_logprobs(self, logits, input_ids):
+        """
+        Compute per-token log probabilities from logits.
+
+        Args:
+            logits: (batch_size, seq_len, vocab_size) model output logits
+            input_ids: (batch_size, seq_len) token IDs
+
+        Returns:
+            (batch_size, seq_len - 1) per-token log probabilities
+        """
+        # Shift: logits[t] predicts input_ids[t+1]
+        logits = logits[:, :-1, :]  # (B, T-1, V)
+        target_ids = input_ids[:, 1:]  # (B, T-1)
+
+        log_probs = torch.log_softmax(logits, dim=-1)
+        # Gather the log prob of the actual token
+        per_token_logps = log_probs.gather(
+            dim=-1, index=target_ids.unsqueeze(-1)
+        ).squeeze(-1)
+
+        return per_token_logps
