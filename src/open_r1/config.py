@@ -66,6 +66,9 @@ class GSPOConfig:
     code_language: str
     dataset_train_split: str
 
+    epsilon: float
+    beta: float
+
     auto_set_chat_template: bool = False
     vllm_mode: str = "server"  # "server" or "colocate"
     vllm_tensor_parallel_size: int = 1
