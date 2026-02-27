@@ -237,9 +237,7 @@ class GSPOTrainer:
 
         padded_ids = torch.zeros(batch_size, max_len, dtype=torch.long)
         attention_mask = torch.zeros(batch_size, max_len, dtype=torch.long)
-        action_mask = torch.zeros(
-            batch_size, max_len - 1, dtype=torch.long
-        )  # -1 for shifted logits
+        valid_mask = torch.zeros(batch_size, max_len - 1, dtype=torch.long)
         seq_lengths = torch.zeros(batch_size, dtype=torch.float32)
 
         for i in range(batch_size):
@@ -251,8 +249,8 @@ class GSPOTrainer:
             padded_ids[i, :seq_len] = conversation
             attention_mask[i, :seq_len] = 1
 
-            # Action mask: 1 for completion tokens, 0 for prompt and padding
-            action_mask[i, prompt_len - 1 : seq_len - 1] = 1
+            # Valid mask: 1 for completion tokens, 0 for prompt and padding
+            valid_mask[i, prompt_len - 1 : seq_len - 1] = 1
             seq_lengths[i] = len(
                 completion_ids[i]
             )  # Length of the generated completion
@@ -260,32 +258,32 @@ class GSPOTrainer:
         # Move tensors to device
         padded_ids = padded_ids.to(self.device)
         attention_mask = attention_mask.to(self.device)
-        action_mask = action_mask.to(self.device)
+        valid_mask = valid_mask.to(self.device)
         seq_lengths = seq_lengths.to(self.device)
         advantages_tensor = torch.tensor(
             advantages, dtype=torch.float32, device=self.device
         )
 
-        # 1. Get current policy log probabilities
+        # Get current policy log probabilities
         logits = self.model(input_ids=padded_ids, attention_mask=attention_mask).logits
         log_probs = self.get_logprobs(logits, padded_ids)
 
-        # 2. Get reference policy log probabilities
+        # Get reference policy log probabilities
         with torch.no_grad():
             ref_logits = self.ref_model(
                 input_ids=padded_ids, attention_mask=attention_mask
             ).logits
             ref_log_probs = self.get_logprobs(ref_logits, padded_ids)
 
-        # 3. Calculate Sequence-level log probabilities
+        # Calculate Sequence-level log probabilities
         # Sum log probs over completion tokens only, then divide by completion length
-        seq_log_probs = (log_probs * action_mask).sum(dim=1) / seq_lengths
-        ref_seq_log_probs = (ref_log_probs * action_mask).sum(dim=1) / seq_lengths
+        seq_log_probs = (log_probs * valid_mask).sum(dim=1) / seq_lengths
+        ref_seq_log_probs = (ref_log_probs * valid_mask).sum(dim=1) / seq_lengths
 
         # For a single forward pass per rollout, old_seq_log_probs is the detached current seq_log_probs
         old_seq_log_probs = seq_log_probs.detach()
 
-        # 4. Calculate GSPO Surrogate Loss (Sequence level)
+        # Calculate GSPO Surrogate Loss (Sequence level)
         seq_ratio = torch.exp(seq_log_probs - old_seq_log_probs)
 
         surr1 = seq_ratio * advantages_tensor
@@ -295,7 +293,7 @@ class GSPOTrainer:
         )
         policy_loss = -torch.min(surr1, surr2)
 
-        # 5. Calculate Sequence-level KL divergence penalty
+        # Calculate Sequence-level KL divergence penalty
         seq_kl = (
             torch.exp(ref_seq_log_probs - seq_log_probs)
             - (ref_seq_log_probs - seq_log_probs)
