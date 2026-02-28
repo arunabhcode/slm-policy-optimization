@@ -112,13 +112,27 @@ class GSPOTrainer:
 
         # Initialize scheduler
         num_warmup_steps = int(total_steps * self.config.warmup_ratio)
+        scheduler_kwargs = self.config.lr_scheduler_kwargs.copy() if self.config.lr_scheduler_kwargs else {}
+        
+        if "min_lr_rate" in scheduler_kwargs:
+            ratio = scheduler_kwargs.pop("min_lr_rate")
+            scheduler_kwargs["min_lr"] = self.config.learning_rate * ratio
+
         self.scheduler = transformers.get_scheduler(
             name=self.config.lr_scheduler_type,
             optimizer=self.optimizer,
             num_warmup_steps=num_warmup_steps,
             num_training_steps=total_steps,
-            **self.config.lr_scheduler_kwargs,
+            scheduler_specific_kwargs=scheduler_kwargs,
         )
+
+        # self.scheduler = transformers.get_scheduler(
+        #     name=self.config.lr_scheduler_type,
+        #     optimizer=self.optimizer,
+        #     num_warmup_steps=num_warmup_steps,
+        #     num_training_steps=total_steps,
+        #     **self.config.lr_scheduler_kwargs,
+        # )
 
         print(
             f"Optimizer initialized: {total_steps} total steps, {num_warmup_steps} warmup steps"
@@ -146,7 +160,7 @@ class GSPOTrainer:
             logprobs=1,  # Return logprobs for importance sampling
         )
 
-        if isinstance(prompts[0], list):
+        if isinstance(prompts[0], (list, tuple)):
             formatted_prompts = [
                 self.tokenizer.apply_chat_template(
                     prompt, tokenize=False, add_generation_prompt=True
@@ -154,7 +168,8 @@ class GSPOTrainer:
                 for prompt in prompts
             ]
         else:
-            formatted_prompts = prompts
+            # Force the DataLoader tuple into a list so vLLM doesn't crash
+            formatted_prompts = list(prompts)
 
         outputs = self.llm.generate(
             formatted_prompts, sampling_params=sampling_params, use_tqdm=False
