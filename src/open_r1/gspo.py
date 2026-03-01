@@ -34,10 +34,17 @@ class GSPOTrainer:
             reward_weights if reward_weights else [1.0] * len(reward_funcs)
         )
 
+        def custom_collate(features):
+            batch = {}
+            for key in features[0].keys():
+                batch[key] = [f[key] for f in features]
+            return batch
+
         self.dataloader = torch.utils.data.DataLoader(
             self.train_dataset,
             batch_size=self.config.per_device_train_batch_size,
             shuffle=True,
+            collate_fn=custom_collate,
         )
 
         # Initialize vLLM for generation
@@ -126,14 +133,6 @@ class GSPOTrainer:
             scheduler_specific_kwargs=scheduler_kwargs,
         )
 
-        # self.scheduler = transformers.get_scheduler(
-        #     name=self.config.lr_scheduler_type,
-        #     optimizer=self.optimizer,
-        #     num_warmup_steps=num_warmup_steps,
-        #     num_training_steps=total_steps,
-        #     **self.config.lr_scheduler_kwargs,
-        # )
-
         print(
             f"Optimizer initialized: {total_steps} total steps, {num_warmup_steps} warmup steps"
         )
@@ -156,8 +155,8 @@ class GSPOTrainer:
         sampling_params = SamplingParams(
             temperature=self.config.temperature,
             max_tokens=self.config.max_completion_length,
-            n=self.config.num_generations,  # Generate multiple completions per prompt
-            logprobs=1,  # Return logprobs for importance sampling
+            n=self.config.num_generations,
+            logprobs=1,
         )
 
         if isinstance(prompts[0], (list, tuple)):
@@ -168,7 +167,6 @@ class GSPOTrainer:
                 for prompt in prompts
             ]
         else:
-            # Force the DataLoader tuple into a list so vLLM doesn't crash
             formatted_prompts = list(prompts)
 
         outputs = self.llm.generate(
@@ -474,10 +472,17 @@ class GSPOTrainer:
     def evaluate(self):
         """Evaluate the model on eval_dataset by generating completions and computing rewards."""
 
+        def custom_collate(features):
+            batch = {}
+            for key in features[0].keys():
+                batch[key] = [f[key] for f in features]
+            return batch
+
         eval_dataloader = torch.utils.data.DataLoader(
             self.eval_dataset,
             batch_size=self.config.per_device_eval_batch_size,
             shuffle=False,
+            collate_fn=custom_collate,
         )
 
         all_rewards = []
