@@ -20,14 +20,14 @@ vllm_enforce_eager: true
 vllm_gpu_memory_utilization: 0.4
 vllm_max_model_len: 4608
 vllm_tensor_parallel_size: 1
-use_vllm: false
+use_vllm: true
 # vllm_server_host: localhost
 # vllm_server_port: 8000
 ###############################################
 #############Training Arguments################
 ###############################################
 do_eval: false
-gradient_accumulation_steps: 8
+gradient_accumulation_steps: 1
 gradient_checkpointing: true
 gradient_checkpointing_kwargs:
   use_reentrant: false

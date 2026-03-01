@@ -22,7 +22,7 @@ from datasets import load_dataset
 from transformers import set_seed
 from transformers.trainer_utils import get_last_checkpoint
 from gspo import GSPOTrainer
-
+import torch
 
 
 from open_r1.config import GSPOConfig
@@ -30,7 +30,9 @@ from open_r1.utils.model_utils import get_tokenizer
 
 
 logger = logging.getLogger(__name__)
-
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+torch.multiprocessing.set_start_method('spawn', force=True)
+os.environ["VLLM_USE_V1"] = "0"
 
 def main(config):
     # Set seed for reproducibility

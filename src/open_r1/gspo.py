@@ -122,7 +122,7 @@ class GSPOTrainer:
     def init_policy_model(self):
         """Initialize the policy model for training, ref model for KL"""
         if self.use_vllm:
-            print(f"Loading policy model on {self.train_device}, ref model on {self.vllm_device}")
+            print(f"Loading policy model and ref model on {self.train_device}")
         else:
             print(f"Loading policy model and ref model on {self.train_device}")
 
@@ -143,8 +143,8 @@ class GSPOTrainer:
         self.device = self.train_device
         self.model.train()
 
-        # Reference model
-        ref_device = self.vllm_device
+        # Reference model — place on training device to avoid conflicts with vLLM on GPU 0
+        ref_device = self.train_device
         self.ref_model = AutoModelForCausalLM.from_pretrained(
             self.config.model_name_or_path,
             revision=self.config.model_revision,
@@ -194,16 +194,18 @@ class GSPOTrainer:
             )
 
     def pytorch_to_vllm_weights(self):
-        """Resync pytorch weights back to VLLM"""
-        if not self.use_vllm:
-            return
+        """Resync pytorch weights back to VLLM using the V0 engine's model_executor."""
         with torch.no_grad():
-            model_weights = self.model.named_parameters()
+            # 1. Extract weights to the CPU bridge
+            cpu_weights = [(name, param.data.cpu()) for name, param in self.model.named_parameters()]
 
-            vllm_model = (
-                self.llm.llm_engine.model_executor.driver_worker.model_runner.model
-            )
-            vllm_model.load_weights(model_weights)
+            # 2. Access the newly unhidden V0 model executor
+            vllm_model = self.llm.llm_engine.model_executor.driver_worker.model_runner.model
+            vllm_model.load_weights(cpu_weights)
+
+            # 3. Cleanup
+            del cpu_weights
+            torch.cuda.empty_cache()
 
     def generate_with_model(self, prompts):
         """
@@ -242,16 +244,12 @@ class GSPOTrainer:
                     temperature=self.config.temperature,
                     do_sample=True,
                     top_k=0,
-                    return_dict_in_generate=True,
-                    output_logits=True,
+                    pad_token_id=self.tokenizer.pad_token_id,
                 )
 
-            generated_ids = outputs.sequences
-            # Stack logits: list of (batch, vocab) -> (batch, gen_len, vocab)
-            gen_logits = torch.stack(outputs.logits, dim=1)
+            generated_ids = outputs
 
             for i in range(len(formatted_prompts)):
-                prompt_len = inputs.input_ids[i].ne(self.tokenizer.pad_token_id).sum().item()
                 comp_ids = generated_ids[i, inputs.input_ids.shape[1]:].tolist()
 
                 # Strip trailing pad/eos tokens
@@ -263,22 +261,13 @@ class GSPOTrainer:
 
                 completion_text = self.tokenizer.decode(clean_ids, skip_special_tokens=False)
 
-                # Extract per-token logprobs for this completion
-                sample_logits = gen_logits[i, :len(clean_ids), :]
-                sample_log_probs = torch.log_softmax(sample_logits, dim=-1)
-                token_ids_tensor = torch.tensor(clean_ids, device=sample_log_probs.device)
-                per_token_lps = sample_log_probs.gather(
-                    dim=-1, index=token_ids_tensor.unsqueeze(-1)
-                ).squeeze(-1)
-                # Convert to list-of-dicts format like vLLM
-                logprobs_list = [
-                    {clean_ids[t]: per_token_lps[t].item()} for t in range(len(clean_ids))
-                ]
-
                 all_completions.append(completion_text)
                 all_completion_ids.append(tuple(clean_ids))
-                all_logprobs.append(logprobs_list)
+                all_logprobs.append(None)  # Logprobs recomputed in compute_policy_loss
                 all_prompts.append(formatted_prompts[i])
+
+            del outputs, generated_ids, inputs
+            torch.cuda.empty_cache()
 
         self.model.train()
 
@@ -435,16 +424,24 @@ class GSPOTrainer:
         del logits  # Free policy logits immediately
         torch.cuda.empty_cache()
 
+        # Synchronize CUDA before ref model forward to prevent race conditions
+        # with gradient checkpointing holding references to the same tensors
+        torch.cuda.synchronize(self.device)
+
         # Get reference policy log probabilities in micro-batches to reduce peak memory
-        ref_device = self.vllm_device
+        # Clone tensors to avoid CUDA memory conflicts with gradient checkpointing
+        ref_padded_ids = padded_ids.detach().clone()
+        ref_attention_mask = attention_mask.detach().clone()
+
+        ref_device = self.train_device
         ref_micro_batch_size = max(1, batch_size // 2)  # Process in 2 chunks
         ref_log_probs_chunks = []
 
         with torch.no_grad():
             for mb_start in range(0, batch_size, ref_micro_batch_size):
                 mb_end = min(mb_start + ref_micro_batch_size, batch_size)
-                ref_mb_ids = padded_ids[mb_start:mb_end].to(ref_device)
-                ref_mb_mask = attention_mask[mb_start:mb_end].to(ref_device)
+                ref_mb_ids = ref_padded_ids[mb_start:mb_end].to(ref_device)
+                ref_mb_mask = ref_attention_mask[mb_start:mb_end].to(ref_device)
 
                 ref_mb_logits = self.ref_model(
                     input_ids=ref_mb_ids, attention_mask=ref_mb_mask
@@ -457,7 +454,7 @@ class GSPOTrainer:
                 torch.cuda.empty_cache()
 
             ref_log_probs = torch.cat(ref_log_probs_chunks, dim=0)
-            del ref_log_probs_chunks
+            del ref_log_probs_chunks, ref_padded_ids, ref_attention_mask
 
         # Calculate Sequence-level log probabilities
         # Sum log probs over completion tokens only, then divide by completion length
