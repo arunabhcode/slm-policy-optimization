@@ -422,19 +422,19 @@ class GSPOTrainer:
 
         log_probs = self.get_logprobs(logits, padded_ids_out)
         del logits  # Free policy logits immediately
+
+        # Wait for all GPU kernels to finish before freeing memory
+        torch.cuda.synchronize(self.device)
         torch.cuda.empty_cache()
 
-        # Synchronize CUDA before ref model forward to prevent race conditions
-        # with gradient checkpointing holding references to the same tensors
-        torch.cuda.synchronize(self.device)
-
-        # Get reference policy log probabilities in micro-batches to reduce peak memory
-        # Clone tensors to avoid CUDA memory conflicts with gradient checkpointing
+        # Clone tensors for ref model to avoid any shared memory issues
+        # with gradient checkpointing's saved tensors
         ref_padded_ids = padded_ids.detach().clone()
         ref_attention_mask = attention_mask.detach().clone()
 
+        # Get reference policy log probabilities in micro-batches
         ref_device = self.train_device
-        ref_micro_batch_size = max(1, batch_size // 2)  # Process in 2 chunks
+        ref_micro_batch_size = max(1, batch_size // 2)
         ref_log_probs_chunks = []
 
         with torch.no_grad():
@@ -451,6 +451,7 @@ class GSPOTrainer:
                 ref_log_probs_chunks.append(ref_mb_log_probs.to(output_device))
 
                 del ref_mb_logits, ref_mb_ids, ref_mb_mask
+                torch.cuda.synchronize(ref_device)
                 torch.cuda.empty_cache()
 
             ref_log_probs = torch.cat(ref_log_probs_chunks, dim=0)
@@ -544,6 +545,11 @@ class GSPOTrainer:
                 # 2. Compute rewards
                 rewards = self.compute_rewards(rollouts["completions"], solutions)
 
+                # Save sample for logging before rollouts gets deleted
+                sample_prompt = prompts[0] if prompts else None
+                sample_completion = rollouts["completions"][0][:200] if rollouts["completions"] else None
+                sample_reward = rewards[0] if rewards else None
+
                 # 3. Calculate advantages using group normalization
                 advantages = self.compute_advantages(
                     rewards, self.config.num_generations
@@ -598,9 +604,9 @@ class GSPOTrainer:
                             self.config.log_completions
                             and self.global_step % (self.config.logging_steps * 10) == 0
                         ):
-                            print(f"Prompt: {prompts[0]}")
-                            print(f"Completion: {rollouts['completions'][0][:200]}")
-                            print(f"Reward: {rewards[0]:.4f}")
+                            print(f"Prompt: {sample_prompt}")
+                            print(f"Completion: {sample_completion}")
+                            print(f"Reward: {sample_reward:.4f}")
 
                         total_loss = 0.0
 
