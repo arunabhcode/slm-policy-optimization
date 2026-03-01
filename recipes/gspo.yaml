@@ -44,7 +44,7 @@ lr_scheduler_kwargs:
 max_prompt_length: 512
 max_completion_length: 3584
 max_steps: 500
-num_generations: 6
+num_generations: 1
 num_train_epochs: 1
 output_dir: data/OpenRS-GRPO
 overwrite_output_dir: true

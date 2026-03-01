@@ -23,17 +23,7 @@ from transformers import set_seed
 from transformers.trainer_utils import get_last_checkpoint
 from gspo import GSPOTrainer
 
-from open_r1.rewards import (
-    accuracy_reward,
-    code_reward,
-    format_reward,
-    get_code_format_reward,
-    get_cosine_scaled_reward,
-    get_repetition_penalty_reward,
-    len_reward,
-    reasoning_steps_reward,
-    tag_count_reward,
-)
+
 
 from open_r1.config import GSPOConfig
 from open_r1.utils.model_utils import get_tokenizer
@@ -82,29 +72,6 @@ def main(config):
     ################
     tokenizer = get_tokenizer(config)
 
-    # Get reward functions
-    REWARD_FUNCS_REGISTRY = {
-        "accuracy": accuracy_reward,
-        "format": format_reward,
-        "reasoning_steps": reasoning_steps_reward,
-        "cosine": get_cosine_scaled_reward(
-            min_value_wrong=config.cosine_min_value_wrong,
-            max_value_wrong=config.cosine_max_value_wrong,
-            min_value_correct=config.cosine_min_value_correct,
-            max_value_correct=config.cosine_max_value_correct,
-            max_len=config.cosine_max_len,
-        ),
-        "repetition_penalty": get_repetition_penalty_reward(
-            ngram_size=config.repetition_n_grams,
-            max_penalty=config.repetition_max_penalty,
-        ),
-        "length": len_reward,
-        "code": code_reward,
-        "code_format": get_code_format_reward(language=config.code_language),
-        "tag_count": tag_count_reward,
-    }
-    reward_funcs = [REWARD_FUNCS_REGISTRY[func] for func in config.reward_funcs]
-
     # Format into conversation
     def make_conversation(example):
         prompt = []
@@ -130,8 +97,6 @@ def main(config):
         config=config,
         train_dataset=dataset[config.dataset_train_split],
         tokenizer=tokenizer,
-        reward_funcs=reward_funcs,
-        reward_weights=config.reward_weights,
     )
 
     ###############
@@ -174,7 +139,7 @@ def main(config):
 
 
 if __name__ == "__main__":
-    yaml_path = "/home/arunabh/slm-policy-optimization/recipes/gspo.yaml"
+    yaml_path = "/home/tiny/slm-policy-optimization/recipes/gspo.yaml"
     # yaml_path = sys.argv[1]
     GSPOConfig = GSPOConfig.from_yaml(yaml_path)
     main(GSPOConfig)

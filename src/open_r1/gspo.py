@@ -13,7 +13,17 @@ import json
 import transformers
 
 from open_r1.utils.model_utils import get_tokenizer
-
+from open_r1.rewards import (
+    accuracy_reward,
+    code_reward,
+    format_reward,
+    get_code_format_reward,
+    get_cosine_scaled_reward,
+    get_repetition_penalty_reward,
+    len_reward,
+    reasoning_steps_reward,
+    tag_count_reward,
+)
 
 class GSPOTrainer:
     def __init__(
@@ -22,16 +32,34 @@ class GSPOTrainer:
         train_dataset=None,
         eval_dataset=None,
         tokenizer=None,
-        reward_funcs=None,
-        reward_weights=None,
     ):
         self.config = config
         self.train_dataset = train_dataset
         self.eval_dataset = eval_dataset
         self.tokenizer = tokenizer
-        self.reward_funcs = reward_funcs
+        REWARD_FUNCS_REGISTRY = {
+        "accuracy": accuracy_reward,
+        "format": format_reward,
+        "reasoning_steps": reasoning_steps_reward,
+        "cosine": get_cosine_scaled_reward(
+            min_value_wrong=config.cosine_min_value_wrong,
+            max_value_wrong=config.cosine_max_value_wrong,
+            min_value_correct=config.cosine_min_value_correct,
+            max_value_correct=config.cosine_max_value_correct,
+            max_len=config.cosine_max_len,
+        ),
+        "repetition_penalty": get_repetition_penalty_reward(
+            ngram_size=config.repetition_n_grams,
+            max_penalty=config.repetition_max_penalty,
+        ),
+        "length": len_reward,
+        "code": code_reward,
+        "code_format": get_code_format_reward(language=config.code_language),
+        "tag_count": tag_count_reward,
+        }
+        self.reward_funcs = [REWARD_FUNCS_REGISTRY[func] for func in config.reward_funcs]
         self.reward_weights = (
-            reward_weights if reward_weights else [1.0] * len(reward_funcs)
+            config.reward_weights if config.reward_weights else [1.0] * len(self.reward_funcs)
         )
 
         def custom_collate(features):
@@ -39,19 +67,20 @@ class GSPOTrainer:
             for key in features[0].keys():
                 batch[key] = [f[key] for f in features]
             return batch
-
-        self.dataloader = torch.utils.data.DataLoader(
-            self.train_dataset,
-            batch_size=self.config.per_device_train_batch_size,
-            shuffle=True,
-            collate_fn=custom_collate,
-        )
-
-        # Initialize vLLM for generation
-        self.init_vllm()
+        if self.train_dataset is not None:
+            self.dataloader = torch.utils.data.DataLoader(
+                self.train_dataset,
+                batch_size=self.config.per_device_train_batch_size,
+                shuffle=True,
+                collate_fn=custom_collate,
+            )
 
         # Initialize policy model for training
         self.init_policy_model()
+        
+        # Initialize vLLM for generation
+        self.init_vllm()
+
 
         # Initialize optimizer and scheduler
         self.init_optimizer()
@@ -102,40 +131,41 @@ class GSPOTrainer:
     def init_optimizer(self):
         """Initialize optimizer and learning rate scheduler"""
         # Calculate total training steps
-        steps_per_epoch = (
-            len(self.dataloader) // self.config.gradient_accumulation_steps
-        )
-        total_steps = min(
-            self.config.max_steps, steps_per_epoch * self.config.num_train_epochs
-        )
+        if self.train_dataset is not None:
+            steps_per_epoch = (
+                len(self.dataloader) // self.config.gradient_accumulation_steps
+            )
+            total_steps = min(
+                self.config.max_steps, steps_per_epoch * self.config.num_train_epochs
+            )
 
-        # Initialize optimizer
-        self.optimizer = torch.optim.AdamW(
-            self.model.parameters(),
-            lr=self.config.learning_rate,
-            betas=(0.9, 0.999),
-            eps=1e-8,
-        )
+            # Initialize optimizer
+            self.optimizer = torch.optim.AdamW(
+                self.model.parameters(),
+                lr=self.config.learning_rate,
+                betas=(0.9, 0.999),
+                eps=1e-8,
+            )
 
-        # Initialize scheduler
-        num_warmup_steps = int(total_steps * self.config.warmup_ratio)
-        scheduler_kwargs = self.config.lr_scheduler_kwargs.copy() if self.config.lr_scheduler_kwargs else {}
-        
-        if "min_lr_rate" in scheduler_kwargs:
-            ratio = scheduler_kwargs.pop("min_lr_rate")
-            scheduler_kwargs["min_lr"] = self.config.learning_rate * ratio
+            # Initialize scheduler
+            num_warmup_steps = int(total_steps * self.config.warmup_ratio)
+            scheduler_kwargs = self.config.lr_scheduler_kwargs.copy() if self.config.lr_scheduler_kwargs else {}
+            
+            if "min_lr_rate" in scheduler_kwargs:
+                ratio = scheduler_kwargs.pop("min_lr_rate")
+                scheduler_kwargs["min_lr"] = self.config.learning_rate * ratio
 
-        self.scheduler = transformers.get_scheduler(
-            name=self.config.lr_scheduler_type,
-            optimizer=self.optimizer,
-            num_warmup_steps=num_warmup_steps,
-            num_training_steps=total_steps,
-            scheduler_specific_kwargs=scheduler_kwargs,
-        )
+            self.scheduler = transformers.get_scheduler(
+                name=self.config.lr_scheduler_type,
+                optimizer=self.optimizer,
+                num_warmup_steps=num_warmup_steps,
+                num_training_steps=total_steps,
+                scheduler_specific_kwargs=scheduler_kwargs,
+            )
 
-        print(
-            f"Optimizer initialized: {total_steps} total steps, {num_warmup_steps} warmup steps"
-        )
+            print(
+                f"Optimizer initialized: {total_steps} total steps, {num_warmup_steps} warmup steps"
+            )
 
     def pytorch_to_vllm_weights(self):
         """Resync pytorch weights back to VLLM"""
