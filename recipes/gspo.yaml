@@ -17,9 +17,8 @@ bf16: true
 ###############################################
 vllm_device: auto
 vllm_enforce_eager: true
-vllm_gpu_memory_utilization: 0.7
+vllm_gpu_memory_utilization: 0.4
 vllm_max_model_len: 4608
-vllm_mode: server # "server" or "colocate"
 vllm_tensor_parallel_size: 1
 use_vllm: true
 # vllm_server_host: localhost

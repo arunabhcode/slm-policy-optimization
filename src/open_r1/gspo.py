@@ -37,6 +37,11 @@ class GSPOTrainer:
         self.train_dataset = train_dataset
         self.eval_dataset = eval_dataset
         self.tokenizer = tokenizer
+
+        # Device assignment: vLLM + ref_model on GPU 0, training on GPU 1
+        self.vllm_device = "cuda:0"
+        self.train_device = "cuda:1" if torch.cuda.device_count() > 1 else "cuda:0"
+
         REWARD_FUNCS_REGISTRY = {
         "accuracy": accuracy_reward,
         "format": format_reward,
@@ -75,12 +80,11 @@ class GSPOTrainer:
                 collate_fn=custom_collate,
             )
 
-        # Initialize policy model for training
-        self.init_policy_model()
-        
-        # Initialize vLLM for generation
+        # Initialize vLLM for generation FIRST (on GPU 0)
         self.init_vllm()
 
+        # Initialize policy model for training SECOND (on GPU 1)
+        self.init_policy_model()
 
         # Initialize optimizer and scheduler
         self.init_optimizer()
@@ -90,8 +94,8 @@ class GSPOTrainer:
         self.epoch = 0
 
     def init_vllm(self):
-        """Initialize vLLM engine for generation"""
-        print(f"Initializing vLLM with model: {self.config.model_name_or_path}")
+        """Initialize vLLM engine for generation on GPU 0"""
+        print(f"Initializing vLLM with model: {self.config.model_name_or_path} on {self.vllm_device}")
 
         self.llm = LLM(
             model=self.config.model_name_or_path,
@@ -101,11 +105,12 @@ class GSPOTrainer:
             gpu_memory_utilization=self.config.vllm_gpu_memory_utilization,
             max_model_len=self.config.vllm_max_model_len,
             enforce_eager=self.config.vllm_enforce_eager,
+            tensor_parallel_size=self.config.vllm_tensor_parallel_size,
         )
 
     def init_policy_model(self):
-        """Initialize the policy model for training"""
-        print(f"Loading policy model: {self.config.model_name_or_path}")
+        """Initialize the policy model for training on GPU 1, ref model on GPU 0"""
+        print(f"Loading policy model on {self.train_device}, ref model on {self.vllm_device}")
 
         self.model = AutoModelForCausalLM.from_pretrained(
             self.config.model_name_or_path,
@@ -113,7 +118,7 @@ class GSPOTrainer:
             trust_remote_code=self.config.trust_remote_code,
             torch_dtype=getattr(torch, self.config.torch_dtype),
             attn_implementation=self.config.attn_implementation,
-        )
+        ).to(self.train_device)
 
         # Enable gradient checkpointing if configured
         if self.config.gradient_checkpointing:
@@ -121,11 +126,17 @@ class GSPOTrainer:
                 gradient_checkpointing_kwargs=self.config.gradient_checkpointing_kwargs
             )
 
-        # Move to device
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.model.to(self.device)
+        self.device = self.train_device
         self.model.train()
-        self.ref_model = copy.deepcopy(self.model)
+
+        # Reference model lives on GPU 0 alongside vLLM
+        self.ref_model = AutoModelForCausalLM.from_pretrained(
+            self.config.model_name_or_path,
+            revision=self.config.model_revision,
+            trust_remote_code=self.config.trust_remote_code,
+            torch_dtype=getattr(torch, self.config.torch_dtype),
+            attn_implementation=self.config.attn_implementation,
+        ).to(self.vllm_device)
         self.ref_model.eval()
 
     def init_optimizer(self):
@@ -298,25 +309,34 @@ class GSPOTrainer:
                 completion_ids[i]
             )  # Length of the generated completion
 
-        # Move tensors to device
+        # Move input tensors to the training device
         padded_ids = padded_ids.to(self.device)
         attention_mask = attention_mask.to(self.device)
-        valid_mask = valid_mask.to(self.device)
-        seq_lengths = seq_lengths.to(self.device)
-        advantages_tensor = torch.tensor(
-            advantages, dtype=torch.float32, device=self.device
-        )
 
         # Get current policy log probabilities
         logits = self.model(input_ids=padded_ids, attention_mask=attention_mask).logits
-        log_probs = self.get_logprobs(logits, padded_ids)
 
-        # Get reference policy log probabilities
+        output_device = logits.device
+        valid_mask = valid_mask.to(output_device)
+        seq_lengths = seq_lengths.to(output_device)
+        padded_ids_out = padded_ids.to(output_device)
+        advantages_tensor = torch.tensor(
+            advantages, dtype=torch.float32, device=output_device
+        )
+
+        log_probs = self.get_logprobs(logits, padded_ids_out)
+
+        # Get reference policy log probabilities (on ref model device, then move result back)
         with torch.no_grad():
+            ref_padded_ids = padded_ids.to(self.vllm_device)
+            ref_attention_mask = attention_mask.to(self.vllm_device)
             ref_logits = self.ref_model(
-                input_ids=padded_ids, attention_mask=attention_mask
+                input_ids=ref_padded_ids, attention_mask=ref_attention_mask
             ).logits
-            ref_log_probs = self.get_logprobs(ref_logits, padded_ids)
+            ref_padded_ids_out = ref_padded_ids.to(ref_logits.device)
+            ref_log_probs = self.get_logprobs(ref_logits, ref_padded_ids_out)
+            # Move ref log probs to training device for loss computation
+            ref_log_probs = ref_log_probs.to(output_device)
 
         # Calculate Sequence-level log probabilities
         # Sum log probs over completion tokens only, then divide by completion length
@@ -370,7 +390,7 @@ class GSPOTrainer:
                     resume_from_checkpoint,
                     torch_dtype=getattr(torch, self.config.torch_dtype),
                     attn_implementation=self.config.attn_implementation,
-                ).to(self.device)
+                ).to(self.train_device)
                 self.model.train()
                 self.pytorch_to_vllm_weights()
                 print(f"Resumed at step {self.global_step}")
