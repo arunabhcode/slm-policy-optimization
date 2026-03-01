@@ -37,10 +37,20 @@ class GSPOTrainer:
         self.train_dataset = train_dataset
         self.eval_dataset = eval_dataset
         self.tokenizer = tokenizer
+        if self.tokenizer is not None:
+            self.tokenizer.padding_side = "left"
+            if self.tokenizer.pad_token is None:
+                self.tokenizer.pad_token = self.tokenizer.eos_token
 
-        # Device assignment: vLLM + ref_model on GPU 0, training on GPU 1
-        self.vllm_device = "cuda:0"
-        self.train_device = "cuda:1" if torch.cuda.device_count() > 1 else "cuda:0"
+        self.use_vllm = getattr(config, "use_vllm", True)
+
+        # Device assignment
+        if self.use_vllm:
+            self.vllm_device = "cuda:0"
+            self.train_device = "cuda:1"
+        else:
+            self.train_device = "cuda:0"
+            self.vllm_device = "cuda:0"
 
         REWARD_FUNCS_REGISTRY = {
         "accuracy": accuracy_reward,
@@ -81,7 +91,8 @@ class GSPOTrainer:
             )
 
         # Initialize vLLM for generation FIRST (on GPU 0)
-        self.init_vllm()
+        if self.use_vllm:
+            self.init_vllm()
 
         # Initialize policy model for training SECOND (on GPU 1)
         self.init_policy_model()
@@ -109,8 +120,11 @@ class GSPOTrainer:
         )
 
     def init_policy_model(self):
-        """Initialize the policy model for training on GPU 1, ref model on GPU 0"""
-        print(f"Loading policy model on {self.train_device}, ref model on {self.vllm_device}")
+        """Initialize the policy model for training, ref model for KL"""
+        if self.use_vllm:
+            print(f"Loading policy model on {self.train_device}, ref model on {self.vllm_device}")
+        else:
+            print(f"Loading policy model and ref model on {self.train_device}")
 
         self.model = AutoModelForCausalLM.from_pretrained(
             self.config.model_name_or_path,
@@ -129,14 +143,15 @@ class GSPOTrainer:
         self.device = self.train_device
         self.model.train()
 
-        # Reference model lives on GPU 0 alongside vLLM
+        # Reference model
+        ref_device = self.vllm_device
         self.ref_model = AutoModelForCausalLM.from_pretrained(
             self.config.model_name_or_path,
             revision=self.config.model_revision,
             trust_remote_code=self.config.trust_remote_code,
             torch_dtype=getattr(torch, self.config.torch_dtype),
             attn_implementation=self.config.attn_implementation,
-        ).to(self.vllm_device)
+        ).to(ref_device)
         self.ref_model.eval()
 
     def init_optimizer(self):
@@ -180,6 +195,8 @@ class GSPOTrainer:
 
     def pytorch_to_vllm_weights(self):
         """Resync pytorch weights back to VLLM"""
+        if not self.use_vllm:
+            return
         with torch.no_grad():
             model_weights = self.model.named_parameters()
 
@@ -188,7 +205,100 @@ class GSPOTrainer:
             )
             vllm_model.load_weights(model_weights)
 
+    def generate_with_model(self, prompts):
+        """
+        Generate completions using HuggingFace model.generate() instead of vLLM.
+        """
+        all_completions = []
+        all_completion_ids = []
+        all_logprobs = []
+        all_prompts = []
+
+        if isinstance(prompts[0], (list, tuple)):
+            formatted_prompts = [
+                self.tokenizer.apply_chat_template(
+                    prompt, tokenize=False, add_generation_prompt=True
+                )
+                for prompt in prompts
+            ]
+        else:
+            formatted_prompts = list(prompts)
+
+        self.model.eval()
+
+        for gen_idx in range(self.config.num_generations):
+            # Tokenize all prompts together (left-padded)
+            inputs = self.tokenizer(
+                formatted_prompts,
+                return_tensors="pt",
+                padding=True,
+                add_special_tokens=False,
+            ).to(self.device)
+
+            with torch.no_grad():
+                outputs = self.model.generate(
+                    **inputs,
+                    max_new_tokens=self.config.max_completion_length,
+                    temperature=self.config.temperature,
+                    do_sample=True,
+                    top_k=0,
+                    return_dict_in_generate=True,
+                    output_logits=True,
+                )
+
+            generated_ids = outputs.sequences
+            # Stack logits: list of (batch, vocab) -> (batch, gen_len, vocab)
+            gen_logits = torch.stack(outputs.logits, dim=1)
+
+            for i in range(len(formatted_prompts)):
+                prompt_len = inputs.input_ids[i].ne(self.tokenizer.pad_token_id).sum().item()
+                comp_ids = generated_ids[i, inputs.input_ids.shape[1]:].tolist()
+
+                # Strip trailing pad/eos tokens
+                clean_ids = []
+                for tid in comp_ids:
+                    if tid == self.tokenizer.eos_token_id or tid == self.tokenizer.pad_token_id:
+                        break
+                    clean_ids.append(tid)
+
+                completion_text = self.tokenizer.decode(clean_ids, skip_special_tokens=False)
+
+                # Extract per-token logprobs for this completion
+                sample_logits = gen_logits[i, :len(clean_ids), :]
+                sample_log_probs = torch.log_softmax(sample_logits, dim=-1)
+                token_ids_tensor = torch.tensor(clean_ids, device=sample_log_probs.device)
+                per_token_lps = sample_log_probs.gather(
+                    dim=-1, index=token_ids_tensor.unsqueeze(-1)
+                ).squeeze(-1)
+                # Convert to list-of-dicts format like vLLM
+                logprobs_list = [
+                    {clean_ids[t]: per_token_lps[t].item()} for t in range(len(clean_ids))
+                ]
+
+                all_completions.append(completion_text)
+                all_completion_ids.append(tuple(clean_ids))
+                all_logprobs.append(logprobs_list)
+                all_prompts.append(formatted_prompts[i])
+
+        self.model.train()
+
+        return {
+            "completions": all_completions,
+            "completion_ids": all_completion_ids,
+            "logprobs": all_logprobs,
+            "prompts": all_prompts,
+        }
+
     def generate_rollouts(self, prompts):
+        """
+        Generate completions for the given prompts.
+        """
+        if self.use_vllm:
+            return self._generate_rollouts_vllm(prompts)
+        else:
+            return self.generate_with_model(prompts)
+
+    def _generate_rollouts_vllm(self, prompts):
         """
         Generate completions using vLLM for the given prompts.
         """
@@ -265,11 +375,6 @@ class GSPOTrainer:
         """
         # Get completion token IDs and convert to tensors
 
-        old_seq_log_probs_list = []
-        ref_seq_log_probs_list = []
-        valid_masks_list = []
-        inputs_list = []
-
         prompt_ids = [
             self.tokenizer(
                 p, return_tensors="pt", padding=False, add_special_tokens=False
@@ -300,11 +405,13 @@ class GSPOTrainer:
             seq_len = len(conversation)
             prompt_len = len(prompt_ids[i])
 
-            padded_ids[i, :seq_len] = conversation
-            attention_mask[i, :seq_len] = 1
+            # Left-pad: place content at the end of the sequence
+            offset = max_len - seq_len
+            padded_ids[i, offset:] = conversation
+            attention_mask[i, offset:] = 1
 
             # Valid mask: 1 for completion tokens, 0 for prompt and padding
-            valid_mask[i, prompt_len - 1 : seq_len - 1] = 1
+            valid_mask[i, offset + prompt_len - 1 : offset + seq_len - 1] = 1
             seq_lengths[i] = len(
                 completion_ids[i]
             )  # Length of the generated completion
@@ -325,23 +432,39 @@ class GSPOTrainer:
         )
 
         log_probs = self.get_logprobs(logits, padded_ids_out)
+        del logits  # Free policy logits immediately
+        torch.cuda.empty_cache()
 
-        # Get reference policy log probabilities (on ref model device, then move result back)
+        # Get reference policy log probabilities in micro-batches to reduce peak memory
+        ref_device = self.vllm_device
+        ref_micro_batch_size = max(1, batch_size // 2)  # Process in 2 chunks
+        ref_log_probs_chunks = []
+
         with torch.no_grad():
-            ref_padded_ids = padded_ids.to(self.vllm_device)
-            ref_attention_mask = attention_mask.to(self.vllm_device)
-            ref_logits = self.ref_model(
-                input_ids=ref_padded_ids, attention_mask=ref_attention_mask
-            ).logits
-            ref_padded_ids_out = ref_padded_ids.to(ref_logits.device)
-            ref_log_probs = self.get_logprobs(ref_logits, ref_padded_ids_out)
-            # Move ref log probs to training device for loss computation
-            ref_log_probs = ref_log_probs.to(output_device)
+            for mb_start in range(0, batch_size, ref_micro_batch_size):
+                mb_end = min(mb_start + ref_micro_batch_size, batch_size)
+                ref_mb_ids = padded_ids[mb_start:mb_end].to(ref_device)
+                ref_mb_mask = attention_mask[mb_start:mb_end].to(ref_device)
+
+                ref_mb_logits = self.ref_model(
+                    input_ids=ref_mb_ids, attention_mask=ref_mb_mask
+                ).logits
+
+                ref_mb_log_probs = self.get_logprobs(ref_mb_logits, ref_mb_ids)
+                ref_log_probs_chunks.append(ref_mb_log_probs.to(output_device))
+
+                del ref_mb_logits, ref_mb_ids, ref_mb_mask
+                torch.cuda.empty_cache()
+
+            ref_log_probs = torch.cat(ref_log_probs_chunks, dim=0)
+            del ref_log_probs_chunks
 
         # Calculate Sequence-level log probabilities
         # Sum log probs over completion tokens only, then divide by completion length
         seq_log_probs = (log_probs * valid_mask).sum(dim=1) / seq_lengths
         ref_seq_log_probs = (ref_log_probs * valid_mask).sum(dim=1) / seq_lengths
+
+        del ref_log_probs, log_probs  # Free these before loss computation
 
         # For a single forward pass per rollout, old_seq_log_probs is the detached current seq_log_probs
         old_seq_log_probs = seq_log_probs.detach()
@@ -437,6 +560,10 @@ class GSPOTrainer:
                 loss.backward()
 
                 total_loss += loss.item()
+
+                # Free loss tensor and clear cache between steps
+                del loss, rollouts
+                torch.cuda.empty_cache()
 
                 # 5. Update policy if we've accumulated enough gradients
                 if (step + 1) % self.config.gradient_accumulation_steps == 0:
