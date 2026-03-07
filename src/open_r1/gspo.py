@@ -48,9 +48,11 @@ class GSPOTrainer:
         if self.use_vllm:
             self.vllm_device = "cuda:0"
             self.train_device = "cuda:1"
+            self.ref_device = "cuda:2"
         else:
             self.train_device = "cuda:0"
             self.vllm_device = "cuda:0"
+            self.ref_device = "cuda:0"
 
         REWARD_FUNCS_REGISTRY = {
         "accuracy": accuracy_reward,
@@ -144,14 +146,13 @@ class GSPOTrainer:
         self.model.train()
 
         # Reference model — place on training device to avoid conflicts with vLLM on GPU 0
-        ref_device = self.train_device
         self.ref_model = AutoModelForCausalLM.from_pretrained(
             self.config.model_name_or_path,
             revision=self.config.model_revision,
             trust_remote_code=self.config.trust_remote_code,
             torch_dtype=getattr(torch, self.config.torch_dtype),
             attn_implementation=self.config.attn_implementation,
-        ).to(ref_device)
+        ).to(self.ref_device)
         self.ref_model.eval()
 
     def init_optimizer(self):
@@ -433,7 +434,7 @@ class GSPOTrainer:
         ref_attention_mask = attention_mask.detach().clone()
 
         # Get reference policy log probabilities in micro-batches
-        ref_device = self.train_device
+        ref_device = self.ref_device  # was: self.train_device
         ref_micro_batch_size = max(1, batch_size // 2)
         ref_log_probs_chunks = []
 
