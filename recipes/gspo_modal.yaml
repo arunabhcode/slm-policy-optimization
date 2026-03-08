@@ -15,13 +15,13 @@ chat_template: "{% for message in messages %}\n{% if message['role'] == 'user' %
 #############VLLM Parameters###################
 ###############################################
 vllm_enforce_eager: true
-vllm_gpu_memory_utilization: 0.5
+vllm_gpu_memory_utilization: 0.20
 vllm_max_model_len: 4608
 vllm_tensor_parallel_size: 1
 use_vllm: true
 vllm_device: cuda:0
-train_device: cuda:1
-ref_device: cuda:2
+train_device: cuda:0
+ref_device: cuda:0
 ###############################################
 #############Training Arguments################
 ###############################################
