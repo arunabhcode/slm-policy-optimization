@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-import wandb
-from logger import print
+import logging
+
 import numpy as np
+import wandb
+
+logger = logging.getLogger(__name__)
 
 PROJECT_NAME = "interview-co"
 
@@ -18,14 +21,15 @@ class Introspect:
         Initialize the introspection class.
         """
         wandb.login()
-        print("Introspect initialized")
+        logger.info("Introspect initialized")
 
-    def initialize(self, config_dict=None):
+    def initialize(self,entity_name, project_name, config_dict=None):
         """
         Initialize the introspection process.
         """
         wandb.init(
-            project=PROJECT_NAME,
+            entity=entity_name,
+            project=project_name,
             config=config_dict,
             mode="online",  # this is online even for local w&b server even though messaging says cloud sync
         )
@@ -46,7 +50,7 @@ class Introspect:
         """
         Log the training_loss): to Weights & Biases.
         """
-        wandb.log({"training_loss:": training_loss})
+        wandb.log({"training_loss": training_loss})
 
     def log_test_loss(self, test_loss):
         """
@@ -86,7 +90,7 @@ class Introspect:
         log_data = {}
         for layer_name, feature_map in feature_maps_dict.items():
             if feature_map is None or feature_map.ndim < 4 or feature_map.shape[0] == 0:
-                print(f"Skipping feature map {layer_name}: Invalid shape or empty")
+                logger.warning(f"Skipping feature map {layer_name}: Invalid shape or empty")
                 continue
 
             # Use the first image in the batch
@@ -122,7 +126,7 @@ class Introspect:
                 or attention_map.ndim < 3
                 or attention_map.shape[0] == 0
             ):  # Needs at least B, H, W or B, S, S
-                print(f"Skipping attention map {map_name}: Invalid shape or empty")
+                logger.warning(f"Skipping attention map {map_name}: Invalid shape or empty")
                 continue
 
             # Use the first item in the batch and the first head (if applicable)
@@ -142,7 +146,18 @@ class Introspect:
             normalized_map_np = normalized_map.cpu().numpy()
 
             log_data[f"attention_map/{map_name}"] = wandb.Image(normalized_map_np)
-            # Consider using heatmaps or allowing selection of specific heads
 
         if log_data:
             wandb.log(log_data)
+
+    def log_completions_table(self, prompts, completions, rewards, step=None):
+        """
+        Log a W&B Table of prompt / completion / reward rows.
+        Truncates long strings to keep the table readable.
+        """
+        table = wandb.Table(columns=["step", "prompt", "completion", "reward"])
+        for prompt, completion, reward in zip(prompts, completions, rewards):
+            prompt_str = str(prompt)[:500]
+            completion_str = str(completion)[:500]
+            table.add_data(step, prompt_str, completion_str, round(float(reward), 4))
+        wandb.log({"completions": table}, commit=False)

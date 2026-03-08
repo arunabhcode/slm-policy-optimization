@@ -32,11 +32,13 @@ class GSPOTrainer:
         train_dataset=None,
         eval_dataset=None,
         tokenizer=None,
+        introspect=None,
     ):
         self.config = config
         self.train_dataset = train_dataset
         self.eval_dataset = eval_dataset
         self.tokenizer = tokenizer
+        self.introspect = introspect
         if self.tokenizer is not None:
             self.tokenizer.padding_side = "left"
             if self.tokenizer.pad_token is None:
@@ -601,6 +603,15 @@ class GSPOTrainer:
                             }
                         )
 
+                        if self.introspect is not None:
+                            self.introspect.log_scalar_dict({
+                                "train/loss": avg_loss,
+                                "train/reward_mean": avg_reward,
+                                "train/learning_rate": lr,
+                                "train/epoch": epoch,
+                                "train/global_step": self.global_step,
+                            })
+
                         if (
                             self.config.log_completions
                             and self.global_step % (self.config.logging_steps * 10) == 0
@@ -608,6 +619,14 @@ class GSPOTrainer:
                             print(f"Prompt: {sample_prompt}")
                             print(f"Completion: {sample_completion}")
                             print(f"Reward: {sample_reward:.4f}")
+
+                            if self.introspect is not None:
+                                self.introspect.log_completions_table(
+                                    prompts=[sample_prompt],
+                                    completions=[sample_completion],
+                                    rewards=[sample_reward],
+                                    step=self.global_step,
+                                )
 
                         total_loss = 0.0
 
@@ -686,12 +705,15 @@ class GSPOTrainer:
                 all_completions.extend(rollouts["completions"])
 
         metrics = {
-            "eval_reward_mean": float(np.mean(all_rewards)),
-            "eval_reward_std": float(np.std(all_rewards)),
-            "eval_reward_min": float(np.min(all_rewards)),
-            "eval_reward_max": float(np.max(all_rewards)),
-            "eval_num_samples": len(all_rewards),
+            "eval/reward_mean": float(np.mean(all_rewards)),
+            "eval/reward_std": float(np.std(all_rewards)),
+            "eval/reward_min": float(np.min(all_rewards)),
+            "eval/reward_max": float(np.max(all_rewards)),
+            "eval/num_samples": len(all_rewards),
         }
+
+        if self.introspect is not None:
+            self.introspect.log_scalar_dict(metrics)
 
         return metrics
 

@@ -24,8 +24,8 @@ from transformers.trainer_utils import get_last_checkpoint
 from gspo import GSPOTrainer
 import torch
 
-
 from open_r1.config import GSPOConfig
+from open_r1.introspect import Introspect
 from open_r1.utils.model_utils import get_tokenizer
 
 
@@ -33,6 +33,7 @@ logger = logging.getLogger(__name__)
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 torch.multiprocessing.set_start_method('spawn', force=True)
 os.environ["VLLM_USE_V1"] = "0"
+
 
 def main(config):
     # Set seed for reproducibility
@@ -63,8 +64,13 @@ def main(config):
     if last_checkpoint is not None and config.resume_from_checkpoint is None:
         logger.info(f"Checkpoint detected, resuming training at {last_checkpoint=}.")
 
-    # if "wandb" in config.report_to:
-    # init_wandb_training(config)
+    introspect = None
+    if "wandb" in config.report_to:
+        config_dict = {
+            k: v for k, v in config.__dict__.items() if not k.startswith("_")
+        }
+        introspect = Introspect()
+        introspect.initialize(entity_name="vrshy-stanford", project_name="slm-policy", config_dict=config_dict)
 
     # Load the dataset
     dataset = load_dataset(config.dataset_name, name=config.dataset_config)
@@ -99,6 +105,7 @@ def main(config):
         config=config,
         train_dataset=dataset[config.dataset_train_split],
         tokenizer=tokenizer,
+        introspect=introspect,
     )
 
     ###############
@@ -138,6 +145,9 @@ def main(config):
         metrics["eval_samples"] = len(dataset[config.dataset_test_split])
         trainer.log_metrics("eval", metrics)
         trainer.save_metrics("eval", metrics)
+
+    if introspect is not None:
+        introspect.finalize()
 
 
 if __name__ == "__main__":
