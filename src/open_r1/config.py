@@ -20,8 +20,6 @@ class GSPOConfig:
     trust_remote_code: bool
     chat_template: str
 
-    bf16: bool
-    vllm_device: str
     vllm_enforce_eager: bool
     vllm_gpu_memory_utilization: float
     vllm_max_model_len: int
@@ -31,25 +29,19 @@ class GSPOConfig:
     gradient_checkpointing_kwargs: dict[str, Any]
     learning_rate: float
     log_completions: bool
-    log_level: str
-    logging_first_step: bool
     logging_steps: int
-    logging_strategy: str
     lr_scheduler_type: str
     lr_scheduler_kwargs: dict[str, Any]
-    max_prompt_length: int
     max_completion_length: int
     max_steps: int
     num_generations: int
     num_train_epochs: int
     output_dir: str
-    overwrite_output_dir: bool
     per_device_eval_batch_size: int
     per_device_train_batch_size: int
     report_to: list[str]
     reward_funcs: list[str]
     reward_weights: list[float]
-    save_strategy: str
     save_steps: int
     seed: int
     temperature: float
