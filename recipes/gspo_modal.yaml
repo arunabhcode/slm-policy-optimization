@@ -1,0 +1,71 @@
+# Model arguments
+model_name_or_path: deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B
+model_revision: main
+torch_dtype: bfloat16
+attn_implementation: flash_attention_2
+
+# Data training arguments
+dataset_name: knoveleng/open-rs
+dataset_config: null
+system_prompt: "A conversation between User and Assistant. The user asks a question, and the Assistant solves it. The assistant first thinks about the reasoning process in the mind and then provides the user with the answer, and put your final answer within \\boxed{{}} . The reasoning process and answer are enclosed within <think> </think> and <answer> </answer> tags, respectively, i.e., <think> reasoning process here </think> <answer> answer here </answer>. Note that respond by English, NOT use other languages."
+trust_remote_code: true
+chat_template: "{% for message in messages %}\n{% if message['role'] == 'user' %}\n{{ '<|user|>\n' + message['content'] + eos_token }}\n{% elif message['role'] == 'system' %}\n{{ '<|system|>\n' + message['content'] + eos_token }}\n{% elif message['role'] == 'assistant' %}\n{{ '<|assistant|>\n'  + message['content'] + eos_token }}\n{% endif %}\n{% if loop.last and add_generation_prompt %}\n{{ '<|assistant|>' }}\n{% endif %}\n{% endfor %}"
+
+###############################################
+#############VLLM Parameters###################
+###############################################
+vllm_enforce_eager: true
+vllm_gpu_memory_utilization: 0.5
+vllm_max_model_len: 4608
+vllm_tensor_parallel_size: 1
+use_vllm: true
+vllm_device: cuda:0
+train_device: cuda:1
+ref_device: cuda:2
+###############################################
+#############Training Arguments################
+###############################################
+do_eval: false
+gradient_accumulation_steps: 1
+gradient_checkpointing: true
+gradient_checkpointing_kwargs:
+  use_reentrant: false
+learning_rate: 1.0e-06
+log_completions: true
+logging_steps: 1
+lr_scheduler_type: cosine_with_min_lr
+lr_scheduler_kwargs:
+  min_lr_rate: 0.1
+max_completion_length: 3584
+max_steps: 1
+num_generations: 2
+num_train_epochs: 1
+output_dir: data/OpenRS-GRPO
+per_device_eval_batch_size: 2
+per_device_train_batch_size: 2
+report_to:
+  - wandb
+reward_funcs:
+  - format
+  - cosine
+reward_weights:
+  - 1.0
+  - 2.0
+epsilon: 0.2
+beta: 0.04
+
+save_steps: 50
+seed: 42
+temperature: 0.7
+warmup_ratio: 0.1
+resume_from_checkpoint: None
+dataset_train_split: train
+
+cosine_min_value_wrong: 0.0
+cosine_max_value_wrong: -0.5
+cosine_min_value_correct: 0.5
+cosine_max_value_correct: 1.0
+cosine_max_len: 1000
+repetition_n_grams: 3
+repetition_max_penalty: -1.0
+code_language: python

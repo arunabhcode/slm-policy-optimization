@@ -22,4 +22,4 @@ echo "CUDA_HOME=$CUDA_HOME"
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export CUDA_VISIBLE_DEVICES=0,1,2
 
-python src/open_r1/main.py "$@"
+python src/open_r1/main.py recipes/gspo.yaml "$@"

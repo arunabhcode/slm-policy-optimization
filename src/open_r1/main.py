@@ -129,13 +129,8 @@ def main(config):
     # Save model and create model card
     ##################################
     logger.info("*** Save model ***")
-    trainer.save_model(config.output_dir)
+    trainer.save_model()
     logger.info(f"Model saved to {config.output_dir}")
-
-    if trainer.accelerator.is_main_process:
-        # Restore k,v cache for fast inference
-        trainer.model.config.use_cache = True
-        trainer.model.config.save_pretrained(config.output_dir)
 
     ##########
     # Evaluate
