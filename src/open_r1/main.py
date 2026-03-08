@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import argparse
 import logging
 import os
 import sys
@@ -151,7 +152,12 @@ def main(config):
 
 
 if __name__ == "__main__":
-    yaml_path = "/home/tiny/slm-policy-optimization/recipes/gspo.yaml"
-    # yaml_path = sys.argv[1]
-    GSPOConfig = GSPOConfig.from_yaml(yaml_path)
-    main(GSPOConfig)
+    parser = argparse.ArgumentParser(description="Train with GSPO from a YAML config.")
+    parser.add_argument(
+        "config",
+        type=str,
+        help="Path to the YAML configuration file (e.g. recipes/gspo.yaml)",
+    )
+    args = parser.parse_args()
+    config = GSPOConfig.from_yaml(args.config)
+    main(config)
