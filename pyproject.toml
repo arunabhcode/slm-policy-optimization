@@ -42,6 +42,9 @@ dependencies = [
   "wandb>=0.19.1"
 ]
 
+[project.optional-dependencies]
+tools = ["modal"]
+
 [tool.setuptools.packages.find]
 where = ["src"]
 
@@ -55,12 +58,6 @@ no-build-package = ["outlines-core"]
 [tool.uv.sources]
 torch = { index = "pytorch-cu128" }
 flash-attn = { url = "https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3/flash_attn-2.8.3+cu12torch2.7cxx11abiFALSE-cp312-cp312-linux_x86_64.whl" }
-
-# [tool.uv.extra-build-dependencies]
-# flash-attn = ["torch>=2.7.0", "setuptools", "wheel", "ninja"]
-
-# [tool.uv.extra-build-variables]
-# flash-attn = { MAX_JOBS = "32", NVCC_THREADS = "1", FLASH_ATTN_CUDA_ARCHS = "120" , CC = "clang", CXX = "clang++"}
 
 [[tool.uv.index]]
 name = "pytorch-cu128"
