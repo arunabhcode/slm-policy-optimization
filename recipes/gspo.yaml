@@ -19,6 +19,9 @@ vllm_gpu_memory_utilization: 0.4
 vllm_max_model_len: 4608
 vllm_tensor_parallel_size: 1
 use_vllm: true
+vllm_device: cuda:0
+train_device: cuda:1
+ref_device: cuda:2
 ###############################################
 #############Training Arguments################
 ###############################################

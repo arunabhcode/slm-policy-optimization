@@ -48,13 +48,13 @@ class GSPOTrainer:
 
         # Device assignment
         if self.use_vllm:
-            self.vllm_device = "cuda:0"
-            self.train_device = "cuda:1"
-            self.ref_device = "cuda:2"
+            self.vllm_device = self.config.vllm_device
+            self.train_device = self.config.train_device
+            self.ref_device = self.config.ref_device
         else:
-            self.train_device = "cuda:0"
-            self.vllm_device = "cuda:0"
-            self.ref_device = "cuda:0"
+            self.train_device = self.config.train_device
+            self.vllm_device = self.config.vllm_device
+            self.ref_device = self.config.ref_device
 
         REWARD_FUNCS_REGISTRY = {
         "accuracy": accuracy_reward,
