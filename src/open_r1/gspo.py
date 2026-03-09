@@ -462,9 +462,7 @@ class GSPOTrainer:
 
         # Compute per-token KL before averaging
         per_token_kl = (
-            torch.exp(ref_log_probs - log_probs.detach())
-            - (ref_log_probs - log_probs.detach())
-            - 1.0
+            torch.exp(log_probs - ref_log_probs) - (log_probs - ref_log_probs) - 1.0
         )
         seq_kl = (per_token_kl * valid_mask).sum(dim=1) / seq_lengths
 
@@ -482,7 +480,7 @@ class GSPOTrainer:
             torch.tensor(lp, dtype=torch.float32) for lp in rollouts["logprobs"]
         ]
         padded_old_logprobs = torch.zeros(
-            batch_size, max_len, dtype=torch.float32, device=output_device
+            batch_size, max_len - 1, dtype=torch.float32, device=output_device
         )
 
         for i in range(batch_size):
@@ -490,9 +488,10 @@ class GSPOTrainer:
             prompt_len = len(prompt_ids[i])
             offset = max_len - seq_len
 
-            padded_old_logprobs[i, offset + prompt_len - 1 : offset + seq_len - 1] = (
-                old_logprobs_list[i].to(output_device)
-            )
+            comp_lp = old_logprobs_list[i].to(output_device)
+            start_idx = offset + prompt_len - 1
+            end_idx = start_idx + len(comp_lp)
+            padded_old_logprobs[i, start_idx:end_idx] = comp_lp
 
         old_seq_log_probs = (padded_old_logprobs * valid_mask).sum(dim=1) / seq_lengths
 
@@ -564,12 +563,6 @@ class GSPOTrainer:
                 ]
 
                 rewards = self.compute_rewards(rollouts["completions"], solutions)
-
-                sample_prompt = prompts[0] if prompts else None
-                sample_completion = (
-                    rollouts["completions"][0][:] if rollouts["completions"] else None
-                )
-                sample_reward = rewards[0] if rewards else None
 
                 advantages = self.compute_advantages(
                     rewards, self.config.num_train_generations
