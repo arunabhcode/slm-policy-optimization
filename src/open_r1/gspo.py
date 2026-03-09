@@ -210,7 +210,7 @@ class GSPOTrainer:
             del cpu_weights
             torch.cuda.empty_cache()
 
-    def generate_with_model(self, prompts):
+    def generate_with_model(self, prompts, num_generations):
         """
         Generate completions using HuggingFace model.generate() instead of vLLM.
         """
@@ -231,7 +231,7 @@ class GSPOTrainer:
 
         self.model.eval()
 
-        for gen_idx in range(self.config.num_generations):
+        for gen_idx in range(num_generations):
             # Tokenize all prompts together (left-padded)
             inputs = self.tokenizer(
                 formatted_prompts,
@@ -281,16 +281,16 @@ class GSPOTrainer:
             "prompts": all_prompts,
         }
 
-    def generate_rollouts(self, prompts):
+    def generate_rollouts(self, prompts, num_generations):
         """
         Generate completions for the given prompts.
         """
         if self.use_vllm:
-            return self._generate_rollouts_vllm(prompts)
+            return self._generate_rollouts_vllm(prompts, num_generations)
         else:
-            return self.generate_with_model(prompts)
+            return self.generate_with_model(prompts, num_generations)
 
-    def _generate_rollouts_vllm(self, prompts):
+    def _generate_rollouts_vllm(self, prompts, num_generations):
         """
         Generate completions using vLLM for the given prompts.
         """
@@ -298,7 +298,7 @@ class GSPOTrainer:
         sampling_params = SamplingParams(
             temperature=self.config.temperature,
             max_tokens=self.config.max_completion_length,
-            n=self.config.num_generations,
+            n=num_generations,
             logprobs=1,
         )
 
@@ -523,7 +523,7 @@ class GSPOTrainer:
         print(f"Max steps: {self.config.max_steps}")
         print(f"Batch size: {self.config.per_device_train_batch_size}")
         print(f"Gradient accumulation steps: {self.config.gradient_accumulation_steps}")
-        print(f"Generations per prompt: {self.config.num_generations}")
+        print(f"Generations per prompt: {self.config.num_train_generations}")
 
         total_loss = 0.0
 
@@ -537,12 +537,12 @@ class GSPOTrainer:
                 # 1. Generate rollouts using vLLM
                 prompts = batch["prompt"]
                 with torch.no_grad():
-                    rollouts = self.generate_rollouts(prompts)
+                    rollouts = self.generate_rollouts(prompts, self.config.num_train_generations)
 
                 solutions = [
                     sol
                     for sol in batch["solution"]
-                    for _ in range(self.config.num_generations)
+                    for _ in range(self.config.num_train_generations)
                 ]
 
                 # 2. Compute rewards
@@ -550,12 +550,12 @@ class GSPOTrainer:
 
                 # Save sample for logging before rollouts gets deleted
                 sample_prompt = prompts[0] if prompts else None
-                sample_completion = rollouts["completions"][0][:200] if rollouts["completions"] else None
+                sample_completion = rollouts["completions"][0][:] if rollouts["completions"] else None
                 sample_reward = rewards[0] if rewards else None
 
                 # 3. Calculate advantages using group normalization
                 advantages = self.compute_advantages(
-                    rewards, self.config.num_generations
+                    rewards, self.config.num_train_generations
                 )
 
                 # 4. Compute policy loss
@@ -625,7 +625,6 @@ class GSPOTrainer:
                                     prompts=[sample_prompt],
                                     completions=[sample_completion],
                                     rewards=[sample_reward],
-                                    step=self.global_step,
                                 )
 
                         total_loss = 0.0
@@ -671,6 +670,14 @@ class GSPOTrainer:
 
     def evaluate(self):
         """Evaluate the model on eval_dataset by generating completions and computing rewards."""
+        if self.eval_dataset is None:
+            return {
+                "eval/reward_mean": 0.0,
+                "eval/reward_std": 0.0,
+                "eval/reward_min": 0.0,
+                "eval/reward_max": 0.0,
+                "eval/num_samples": 0,
+            }
 
         def custom_collate(features):
             batch = {}
@@ -687,23 +694,24 @@ class GSPOTrainer:
 
         all_rewards = []
         all_completions = []
+        all_prompts = []
 
         self.model.eval()
         with torch.no_grad():
             for batch in tqdm(eval_dataloader, desc="Evaluating"):
                 prompts = batch["prompt"]
-                rollouts = self.generate_rollouts(prompts)
+                rollouts = self.generate_rollouts(prompts, self.config.num_eval_generations)
 
                 solutions = [
                     sol
                     for sol in batch["solution"]
-                    for _ in range(self.config.num_generations)
+                    for _ in range(self.config.num_eval_generations)
                 ]
 
                 rewards = self.compute_rewards(rollouts["completions"], solutions)
                 all_rewards.extend(rewards)
                 all_completions.extend(rollouts["completions"])
-
+                all_prompts.extend(rollouts["prompts"])
         metrics = {
             "eval/reward_mean": float(np.mean(all_rewards)),
             "eval/reward_std": float(np.std(all_rewards)),
@@ -714,7 +722,11 @@ class GSPOTrainer:
 
         if self.introspect is not None:
             self.introspect.log_scalar_dict(metrics)
-
+            self.introspect.log_completions_table(
+                prompts=all_prompts,
+                completions=all_completions,
+                rewards=all_rewards,
+            )
         return metrics
 
     def save_model(self):

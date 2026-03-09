@@ -8,9 +8,6 @@ import wandb
 
 logger = logging.getLogger(__name__)
 
-PROJECT_NAME = "interview-co"
-
-
 class Introspect:
     """
     Class for introspecting the model.
@@ -150,14 +147,14 @@ class Introspect:
         if log_data:
             wandb.log(log_data)
 
-    def log_completions_table(self, prompts, completions, rewards, step=None):
+    def log_completions_table(self, prompts, completions, rewards):
         """
         Log a W&B Table of prompt / completion / reward rows.
         Truncates long strings to keep the table readable.
         """
-        table = wandb.Table(columns=["step", "prompt", "completion", "reward"])
+        table = wandb.Table(columns=["prompt", "completion", "reward"])
         for prompt, completion, reward in zip(prompts, completions, rewards):
-            prompt_str = str(prompt)[:500]
-            completion_str = str(completion)[:500]
-            table.add_data(step, prompt_str, completion_str, round(float(reward), 4))
+            prompt_str = str(prompt)
+            completion_str = str(completion)
+            table.add_data(prompt_str, completion_str, round(float(reward), 4))
         wandb.log({"completions": table}, commit=False)

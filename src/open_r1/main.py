@@ -75,7 +75,7 @@ def main(config):
 
     # Load the dataset
     dataset = load_dataset(config.dataset_name, name=config.dataset_config)
-    print(type(dataset))
+    dataset[config.dataset_train_split] = dataset[config.dataset_train_split].select(range(100))
     ################
     # Load tokenizer
     ################
@@ -102,9 +102,15 @@ def main(config):
     #############################
     # Initialize the GRPO trainer
     #############################
+    eval_dataset = (
+        dataset[config.dataset_test_split].select(range(20))
+        if config.do_eval and config.dataset_test_split in dataset
+        else None
+    )
     trainer = GSPOTrainer(
         config=config,
         train_dataset=dataset[config.dataset_train_split],
+        eval_dataset=eval_dataset,
         tokenizer=tokenizer,
         introspect=introspect,
     )
@@ -138,7 +144,10 @@ def main(config):
     if config.do_eval:
         logger.info("*** Evaluate ***")
         metrics = trainer.evaluate()
-        metrics["eval_samples"] = len(dataset[config.dataset_test_split])
+        if config.dataset_test_split in dataset:
+            metrics["eval_samples"] = len(dataset[config.dataset_test_split])
+        else:
+            metrics["eval_samples"] = metrics.get("eval/num_samples", 0)
         trainer.log_metrics("eval", metrics)
         trainer.save_metrics("eval", metrics)
 

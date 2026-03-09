@@ -25,7 +25,7 @@ ref_device: cuda:2
 ###############################################
 #############Training Arguments################
 ###############################################
-do_eval: false
+do_eval: true
 gradient_accumulation_steps: 4
 gradient_checkpointing: true
 gradient_checkpointing_kwargs:
@@ -38,11 +38,12 @@ lr_scheduler_kwargs:
   min_lr_rate: 0.1
 max_completion_length: 3584
 max_steps: 500
-num_generations: 6
+num_train_generations: 4
+num_eval_generations: 1
 num_train_epochs: 1
 output_dir: data/OpenRS-GRPO
-per_device_eval_batch_size: 5
-per_device_train_batch_size: 5
+per_device_eval_batch_size: 1
+per_device_train_batch_size: 1
 report_to:
   - wandb
 reward_funcs:
@@ -60,6 +61,7 @@ temperature: 0.7
 warmup_ratio: 0.1
 resume_from_checkpoint: None
 dataset_train_split: train
+dataset_test_split: train
 
 cosine_min_value_wrong: 0.0
 cosine_max_value_wrong: -0.5

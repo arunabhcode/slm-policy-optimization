@@ -34,7 +34,8 @@ class GSPOConfig:
     lr_scheduler_kwargs: dict[str, Any]
     max_completion_length: int
     max_steps: int
-    num_generations: int
+    num_train_generations: int
+    num_eval_generations: int
     num_train_epochs: int
     output_dir: str
     per_device_eval_batch_size: int
@@ -57,6 +58,7 @@ class GSPOConfig:
     repetition_max_penalty: float
     code_language: str
     dataset_train_split: str
+    dataset_test_split: str
 
     epsilon: float
     beta: float
