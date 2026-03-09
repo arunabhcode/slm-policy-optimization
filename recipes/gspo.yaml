@@ -15,7 +15,7 @@ chat_template: "{% for message in messages %}\n{% if message['role'] == 'user' %
 #############VLLM Parameters###################
 ###############################################
 vllm_enforce_eager: true
-vllm_gpu_memory_utilization: 0.25
+vllm_gpu_memory_utilization: 0.9
 vllm_max_model_len: 4608
 vllm_tensor_parallel_size: 1
 use_vllm: true

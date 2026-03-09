@@ -210,98 +210,12 @@ class GSPOTrainer:
             del cpu_weights
             torch.cuda.empty_cache()
 
-    def generate_with_model(self, prompts, num_generations):
-        """Fallback generation without vLLM, now correctly extracting logprobs."""
-        all_completions = []
-        all_completion_ids = []
-        all_prompt_ids = []
-        all_prompts = []
-        all_logprobs = []
-
-        formatted_prompts = [
-            self.tokenizer.apply_chat_template(
-                p, tokenize=False, add_generation_prompt=True
-            )
-            if isinstance(p, (list, tuple))
-            else p
-            for p in prompts
-        ]
-
-        self.model.eval()
-
-        for gen_idx in range(num_generations):
-            inputs = self.tokenizer(
-                formatted_prompts,
-                return_tensors="pt",
-                padding=True,
-                add_special_tokens=False,
-            ).to(self.device)
-
-            with torch.no_grad():
-                outputs = self.model.generate(
-                    **inputs,
-                    max_new_tokens=self.config.max_completion_length,
-                    temperature=self.config.temperature,
-                    do_sample=True,
-                    top_k=0,
-                    pad_token_id=self.tokenizer.pad_token_id,
-                    return_dict_in_generate=True,
-                    output_scores=True,  # Required for transition scores
-                )
-
-            # Compute actual sequence logprobs
-            transition_scores = self.model.compute_transition_scores(
-                outputs.sequences, outputs.scores, normalize_logits=True
-            )
-
-            generated_ids = outputs.sequences
-
-            for i in range(len(formatted_prompts)):
-                prompt_len = inputs.input_ids.shape[1]
-                prompt_tokens = inputs.input_ids[i].tolist()
-                comp_ids = generated_ids[i, prompt_len:].tolist()
-                comp_scores = transition_scores[i].tolist()
-
-                clean_ids = []
-                clean_logprobs = []
-                for tid, tscore in zip(comp_ids, comp_scores):
-                    if (
-                        tid == self.tokenizer.eos_token_id
-                        or tid == self.tokenizer.pad_token_id
-                    ):
-                        break
-                    clean_ids.append(tid)
-                    clean_logprobs.append(tscore)
-
-                completion_text = self.tokenizer.decode(
-                    clean_ids, skip_special_tokens=False
-                )
-
-                all_completions.append(completion_text)
-                all_completion_ids.append(tuple(clean_ids))
-                all_prompt_ids.append(tuple(prompt_tokens))
-                all_prompts.append(formatted_prompts[i])
-                all_logprobs.append(clean_logprobs)
-
-            del outputs, generated_ids, transition_scores, inputs
-            torch.cuda.empty_cache()
-
-        self.model.train()
-
-        return {
-            "completions": all_completions,
-            "completion_ids": all_completion_ids,
-            "prompt_ids": all_prompt_ids,
-            "prompts": all_prompts,
-            "logprobs": all_logprobs,
-        }
-
     def generate_rollouts(self, prompts, num_generations):
         """Generate completions for the given prompts."""
         if self.use_vllm:
             return self._generate_rollouts_vllm(prompts, num_generations)
         else:
-            return self.generate_with_model(prompts, num_generations)
+            raise NotImplementedError("Non-vLLM generation not implemented")
 
     def _generate_rollouts_vllm(self, prompts, num_generations):
         """Generate completions using vLLM for the given prompts."""
@@ -431,6 +345,9 @@ class GSPOTrainer:
             log_probs_chunks.append(mb_log_probs)
 
             del logits, mb_ids, mb_mask
+
+            # Fences off the memory allocator race condition
+            torch.cuda.synchronize(self.device)
             torch.cuda.empty_cache()
 
         log_probs = torch.cat(log_probs_chunks, dim=0)
