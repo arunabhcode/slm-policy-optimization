@@ -25,6 +25,7 @@ from open_r1.rewards import (
     tag_count_reward,
 )
 
+
 class GSPOTrainer:
     def __init__(
         self,
@@ -47,38 +48,37 @@ class GSPOTrainer:
         self.use_vllm = getattr(config, "use_vllm", True)
 
         # Device assignment
-        if self.use_vllm:
-            self.vllm_device = self.config.vllm_device
-            self.train_device = self.config.train_device
-            self.ref_device = self.config.ref_device
-        else:
-            self.train_device = self.config.train_device
-            self.vllm_device = self.config.vllm_device
-            self.ref_device = self.config.ref_device
+        self.train_device = self.config.train_device
+        self.vllm_device = self.config.vllm_device
+        self.ref_device = self.config.ref_device
 
         REWARD_FUNCS_REGISTRY = {
-        "accuracy": accuracy_reward,
-        "format": format_reward,
-        "reasoning_steps": reasoning_steps_reward,
-        "cosine": get_cosine_scaled_reward(
-            min_value_wrong=config.cosine_min_value_wrong,
-            max_value_wrong=config.cosine_max_value_wrong,
-            min_value_correct=config.cosine_min_value_correct,
-            max_value_correct=config.cosine_max_value_correct,
-            max_len=config.cosine_max_len,
-        ),
-        "repetition_penalty": get_repetition_penalty_reward(
-            ngram_size=config.repetition_n_grams,
-            max_penalty=config.repetition_max_penalty,
-        ),
-        "length": len_reward,
-        "code": code_reward,
-        "code_format": get_code_format_reward(language=config.code_language),
-        "tag_count": tag_count_reward,
+            "accuracy": accuracy_reward,
+            "format": format_reward,
+            "reasoning_steps": reasoning_steps_reward,
+            "cosine": get_cosine_scaled_reward(
+                min_value_wrong=config.cosine_min_value_wrong,
+                max_value_wrong=config.cosine_max_value_wrong,
+                min_value_correct=config.cosine_min_value_correct,
+                max_value_correct=config.cosine_max_value_correct,
+                max_len=config.cosine_max_len,
+            ),
+            "repetition_penalty": get_repetition_penalty_reward(
+                ngram_size=config.repetition_n_grams,
+                max_penalty=config.repetition_max_penalty,
+            ),
+            "length": len_reward,
+            "code": code_reward,
+            "code_format": get_code_format_reward(language=config.code_language),
+            "tag_count": tag_count_reward,
         }
-        self.reward_funcs = [REWARD_FUNCS_REGISTRY[func] for func in config.reward_funcs]
+        self.reward_funcs = [
+            REWARD_FUNCS_REGISTRY[func] for func in config.reward_funcs
+        ]
         self.reward_weights = (
-            config.reward_weights if config.reward_weights else [1.0] * len(self.reward_funcs)
+            config.reward_weights
+            if config.reward_weights
+            else [1.0] * len(self.reward_funcs)
         )
 
         def custom_collate(features):
@@ -86,6 +86,7 @@ class GSPOTrainer:
             for key in features[0].keys():
                 batch[key] = [f[key] for f in features]
             return batch
+
         if self.train_dataset is not None:
             self.dataloader = torch.utils.data.DataLoader(
                 self.train_dataset,
@@ -94,11 +95,11 @@ class GSPOTrainer:
                 collate_fn=custom_collate,
             )
 
-        # Initialize vLLM for generation FIRST (on GPU 0)
+        # Initialize vLLM for generation FIRST
         if self.use_vllm:
             self.init_vllm()
 
-        # Initialize policy model for training SECOND (on GPU 1)
+        # Initialize policy model for training SECOND
         self.init_policy_model()
 
         # Initialize optimizer and scheduler
@@ -109,8 +110,10 @@ class GSPOTrainer:
         self.epoch = 0
 
     def init_vllm(self):
-        """Initialize vLLM engine for generation on GPU 0"""
-        print(f"Initializing vLLM with model: {self.config.model_name_or_path} on {self.vllm_device}")
+        """Initialize vLLM engine for generation"""
+        print(
+            f"Initializing vLLM with model: {self.config.model_name_or_path} on {self.vllm_device}"
+        )
 
         self.llm = LLM(
             model=self.config.model_name_or_path,
@@ -125,10 +128,7 @@ class GSPOTrainer:
 
     def init_policy_model(self):
         """Initialize the policy model for training, ref model for KL"""
-        if self.use_vllm:
-            print(f"Loading policy model and ref model on {self.train_device}")
-        else:
-            print(f"Loading policy model and ref model on {self.train_device}")
+        print(f"Loading policy model and ref model on {self.train_device}")
 
         self.model = AutoModelForCausalLM.from_pretrained(
             self.config.model_name_or_path,
@@ -138,7 +138,6 @@ class GSPOTrainer:
             attn_implementation=self.config.attn_implementation,
         ).to(self.train_device)
 
-        # Enable gradient checkpointing if configured
         if self.config.gradient_checkpointing:
             self.model.gradient_checkpointing_enable(
                 gradient_checkpointing_kwargs=self.config.gradient_checkpointing_kwargs
@@ -147,7 +146,7 @@ class GSPOTrainer:
         self.device = self.train_device
         self.model.train()
 
-        # Reference model — place on training device to avoid conflicts with vLLM on GPU 0
+        # Reference model — place on ref device
         self.ref_model = AutoModelForCausalLM.from_pretrained(
             self.config.model_name_or_path,
             revision=self.config.model_revision,
@@ -159,7 +158,6 @@ class GSPOTrainer:
 
     def init_optimizer(self):
         """Initialize optimizer and learning rate scheduler"""
-        # Calculate total training steps
         if self.train_dataset is not None:
             steps_per_epoch = (
                 len(self.dataloader) // self.config.gradient_accumulation_steps
@@ -168,7 +166,6 @@ class GSPOTrainer:
                 self.config.max_steps, steps_per_epoch * self.config.num_train_epochs
             )
 
-            # Initialize optimizer
             self.optimizer = torch.optim.AdamW(
                 self.model.parameters(),
                 lr=self.config.learning_rate,
@@ -176,10 +173,13 @@ class GSPOTrainer:
                 eps=1e-8,
             )
 
-            # Initialize scheduler
             num_warmup_steps = int(total_steps * self.config.warmup_ratio)
-            scheduler_kwargs = self.config.lr_scheduler_kwargs.copy() if self.config.lr_scheduler_kwargs else {}
-            
+            scheduler_kwargs = (
+                self.config.lr_scheduler_kwargs.copy()
+                if self.config.lr_scheduler_kwargs
+                else {}
+            )
+
             if "min_lr_rate" in scheduler_kwargs:
                 ratio = scheduler_kwargs.pop("min_lr_rate")
                 scheduler_kwargs["min_lr"] = self.config.learning_rate * ratio
@@ -197,42 +197,39 @@ class GSPOTrainer:
             )
 
     def pytorch_to_vllm_weights(self):
-        """Resync pytorch weights back to VLLM using the V0 engine's model_executor."""
+        """Resync pytorch weights back to VLLM safely (assumes TP=1)."""
         with torch.no_grad():
-            # 1. Extract weights to the CPU bridge
-            cpu_weights = [(name, param.data.cpu()) for name, param in self.model.named_parameters()]
-
-            # 2. Access the newly unhidden V0 model executor
-            vllm_model = self.llm.llm_engine.model_executor.driver_worker.model_runner.model
+            cpu_weights = [
+                (name, param.data.cpu())
+                for name, param in self.model.named_parameters()
+            ]
+            vllm_model = (
+                self.llm.llm_engine.model_executor.driver_worker.model_runner.model
+            )
             vllm_model.load_weights(cpu_weights)
-
-            # 3. Cleanup
             del cpu_weights
             torch.cuda.empty_cache()
 
     def generate_with_model(self, prompts, num_generations):
-        """
-        Generate completions using HuggingFace model.generate() instead of vLLM.
-        """
+        """Fallback generation without vLLM, now correctly extracting logprobs."""
         all_completions = []
         all_completion_ids = []
-        all_logprobs = []
+        all_prompt_ids = []
         all_prompts = []
+        all_logprobs = []
 
-        if isinstance(prompts[0], (list, tuple)):
-            formatted_prompts = [
-                self.tokenizer.apply_chat_template(
-                    prompt, tokenize=False, add_generation_prompt=True
-                )
-                for prompt in prompts
-            ]
-        else:
-            formatted_prompts = list(prompts)
+        formatted_prompts = [
+            self.tokenizer.apply_chat_template(
+                p, tokenize=False, add_generation_prompt=True
+            )
+            if isinstance(p, (list, tuple))
+            else p
+            for p in prompts
+        ]
 
         self.model.eval()
 
         for gen_idx in range(num_generations):
-            # Tokenize all prompts together (left-padded)
             inputs = self.tokenizer(
                 formatted_prompts,
                 return_tensors="pt",
@@ -248,28 +245,45 @@ class GSPOTrainer:
                     do_sample=True,
                     top_k=0,
                     pad_token_id=self.tokenizer.pad_token_id,
+                    return_dict_in_generate=True,
+                    output_scores=True,  # Required for transition scores
                 )
 
-            generated_ids = outputs
+            # Compute actual sequence logprobs
+            transition_scores = self.model.compute_transition_scores(
+                outputs.sequences, outputs.scores, normalize_logits=True
+            )
+
+            generated_ids = outputs.sequences
 
             for i in range(len(formatted_prompts)):
-                comp_ids = generated_ids[i, inputs.input_ids.shape[1]:].tolist()
+                prompt_len = inputs.input_ids.shape[1]
+                prompt_tokens = inputs.input_ids[i].tolist()
+                comp_ids = generated_ids[i, prompt_len:].tolist()
+                comp_scores = transition_scores[i].tolist()
 
-                # Strip trailing pad/eos tokens
                 clean_ids = []
-                for tid in comp_ids:
-                    if tid == self.tokenizer.eos_token_id or tid == self.tokenizer.pad_token_id:
+                clean_logprobs = []
+                for tid, tscore in zip(comp_ids, comp_scores):
+                    if (
+                        tid == self.tokenizer.eos_token_id
+                        or tid == self.tokenizer.pad_token_id
+                    ):
                         break
                     clean_ids.append(tid)
+                    clean_logprobs.append(tscore)
 
-                completion_text = self.tokenizer.decode(clean_ids, skip_special_tokens=False)
+                completion_text = self.tokenizer.decode(
+                    clean_ids, skip_special_tokens=False
+                )
 
                 all_completions.append(completion_text)
                 all_completion_ids.append(tuple(clean_ids))
-                all_logprobs.append(None)  # Logprobs recomputed in compute_policy_loss
+                all_prompt_ids.append(tuple(prompt_tokens))
                 all_prompts.append(formatted_prompts[i])
+                all_logprobs.append(clean_logprobs)
 
-            del outputs, generated_ids, inputs
+            del outputs, generated_ids, transition_scores, inputs
             torch.cuda.empty_cache()
 
         self.model.train()
@@ -277,84 +291,83 @@ class GSPOTrainer:
         return {
             "completions": all_completions,
             "completion_ids": all_completion_ids,
-            "logprobs": all_logprobs,
+            "prompt_ids": all_prompt_ids,
             "prompts": all_prompts,
+            "logprobs": all_logprobs,
         }
 
     def generate_rollouts(self, prompts, num_generations):
-        """
-        Generate completions for the given prompts.
-        """
+        """Generate completions for the given prompts."""
         if self.use_vllm:
             return self._generate_rollouts_vllm(prompts, num_generations)
         else:
             return self.generate_with_model(prompts, num_generations)
 
     def _generate_rollouts_vllm(self, prompts, num_generations):
-        """
-        Generate completions using vLLM for the given prompts.
-        """
-        # Configure sampling parameters
+        """Generate completions using vLLM for the given prompts."""
         sampling_params = SamplingParams(
             temperature=self.config.temperature,
             max_tokens=self.config.max_completion_length,
             n=num_generations,
-            logprobs=1,
+            logprobs=1,  # Request logprobs from vLLM
         )
 
-        if isinstance(prompts[0], (list, tuple)):
-            formatted_prompts = [
-                self.tokenizer.apply_chat_template(
-                    prompt, tokenize=False, add_generation_prompt=True
-                )
-                for prompt in prompts
-            ]
-        else:
-            formatted_prompts = list(prompts)
+        formatted_prompts = [
+            self.tokenizer.apply_chat_template(
+                p, tokenize=False, add_generation_prompt=True
+            )
+            if isinstance(p, (list, tuple))
+            else p
+            for p in prompts
+        ]
 
         outputs = self.llm.generate(
             formatted_prompts, sampling_params=sampling_params, use_tqdm=False
         )
 
-        # Extract results
         all_completions = []
         all_completion_ids = []
-        all_logprobs = []
+        all_prompt_ids = []
         all_prompts = []
+        all_logprobs = []
 
         for idx, output in enumerate(outputs):
             for completion_output in output.outputs:
                 all_completions.append(completion_output.text)
                 all_completion_ids.append(completion_output.token_ids)
-                all_logprobs.append(completion_output.logprobs)
+                all_prompt_ids.append(output.prompt_token_ids)
                 all_prompts.append(formatted_prompts[idx])
+
+                # Extract the logprob for each generated token
+                tok_logprobs = [
+                    step_dict[tok_id].logprob if tok_id in step_dict else -100.0
+                    for step_dict, tok_id in zip(
+                        completion_output.logprobs, completion_output.token_ids
+                    )
+                ]
+                all_logprobs.append(tok_logprobs)
 
         return {
             "completions": all_completions,
             "completion_ids": all_completion_ids,
-            "logprobs": all_logprobs,
+            "prompt_ids": all_prompt_ids,
             "prompts": all_prompts,
+            "logprobs": all_logprobs,
         }
 
     def compute_rewards(self, completions, solutions):
-        """Compute rewards for each completion using the configured reward functions"""
+        """Compute rewards for each completion"""
         total_rewards = np.zeros(len(completions))
         formatted_completions = [
             [{"role": "assistant", "content": c}] for c in completions
         ]
         for func, weight in zip(self.reward_funcs, self.reward_weights):
-            func_rewards = func(
-                completions=formatted_completions,
-                solution=solutions,
-            )
+            func_rewards = func(completions=formatted_completions, solution=solutions)
             total_rewards += weight * np.array(func_rewards)
-
         return total_rewards.tolist()
 
     def compute_advantages(self, rewards, num_generations):
-        """
-        Compute advantages using group normalization.
-        """
+        """Compute advantages using group normalization."""
         rewards = np.array(rewards).reshape(-1, num_generations)
         mean = rewards.mean(axis=1, keepdims=True)
         std = rewards.std(axis=1, keepdims=True) + 1e-8
@@ -362,26 +375,16 @@ class GSPOTrainer:
         return advantages.flatten()
 
     def compute_policy_loss(self, rollouts, advantages):
-        """
-        Compute the policy gradient loss for GRPO.
-        """
-        # Get completion token IDs and convert to tensors
+        """Compute the policy gradient loss for GRPO securely and efficiently."""
 
         prompt_ids = [
-            self.tokenizer(
-                p, return_tensors="pt", padding=False, add_special_tokens=False
-            ).input_ids.squeeze(0)
-            for p in rollouts["prompts"]
+            torch.tensor(ids, dtype=torch.long) for ids in rollouts["prompt_ids"]
         ]
-
         completion_ids = [
             torch.tensor(ids, dtype=torch.long) for ids in rollouts["completion_ids"]
         ]
-
-        # Get batch size from the number of completions
         batch_size = len(completion_ids)
 
-        # Pad sequences to same length
         max_len = max(
             (len(pids) + len(cids)) for pids, cids in zip(prompt_ids, completion_ids)
         )
@@ -392,64 +395,61 @@ class GSPOTrainer:
         seq_lengths = torch.zeros(batch_size, dtype=torch.float32)
 
         for i in range(batch_size):
-            # Concatenate prompt and completion
             conversation = torch.cat([prompt_ids[i], completion_ids[i]])
             seq_len = len(conversation)
             prompt_len = len(prompt_ids[i])
 
-            # Left-pad: place content at the end of the sequence
             offset = max_len - seq_len
             padded_ids[i, offset:] = conversation
             attention_mask[i, offset:] = 1
 
-            # Valid mask: 1 for completion tokens, 0 for prompt and padding
+            # 1 for completion tokens, 0 for prompt/padding
             valid_mask[i, offset + prompt_len - 1 : offset + seq_len - 1] = 1
-            seq_lengths[i] = len(
-                completion_ids[i]
-            )  # Length of the generated completion
+            seq_lengths[i] = len(completion_ids[i])
 
-        # Move input tensors to the training device
-        padded_ids = padded_ids.to(self.device)
-        attention_mask = attention_mask.to(self.device)
+        # Clamp seq lengths to avoid Division by Zero
+        seq_lengths = torch.clamp(seq_lengths, min=1.0)
 
-        # Get current policy log probabilities
-        logits = self.model(input_ids=padded_ids, attention_mask=attention_mask).logits
-
-        output_device = logits.device
+        output_device = self.device
         valid_mask = valid_mask.to(output_device)
         seq_lengths = seq_lengths.to(output_device)
-        padded_ids_out = padded_ids.to(output_device)
         advantages_tensor = torch.tensor(
             advantages, dtype=torch.float32, device=output_device
         )
 
-        log_probs = self.get_logprobs(logits, padded_ids_out)
-        del logits  # Free policy logits immediately
+        # Micro-batching policy forward pass to avoid OOM
+        micro_batch_size = max(1, batch_size // 2)
+        log_probs_chunks = []
 
-        # Wait for all GPU kernels to finish before freeing memory
-        torch.cuda.synchronize(self.device)
-        torch.cuda.empty_cache()
+        for mb_start in range(0, batch_size, micro_batch_size):
+            mb_end = min(mb_start + micro_batch_size, batch_size)
+            mb_ids = padded_ids[mb_start:mb_end].to(self.device)
+            mb_mask = attention_mask[mb_start:mb_end].to(self.device)
 
-        # Clone tensors for ref model to avoid any shared memory issues
-        # with gradient checkpointing's saved tensors
+            logits = self.model(input_ids=mb_ids, attention_mask=mb_mask).logits
+            mb_log_probs = self.get_logprobs(logits, mb_ids)
+            log_probs_chunks.append(mb_log_probs)
+
+            del logits, mb_ids, mb_mask
+            torch.cuda.empty_cache()
+
+        log_probs = torch.cat(log_probs_chunks, dim=0)
+
+        # Micro-batching reference model
+        ref_device = self.ref_device
         ref_padded_ids = padded_ids.detach().clone()
         ref_attention_mask = attention_mask.detach().clone()
-
-        # Get reference policy log probabilities in micro-batches
-        ref_device = self.ref_device  # was: self.train_device
-        ref_micro_batch_size = max(1, batch_size // 2)
         ref_log_probs_chunks = []
 
         with torch.no_grad():
-            for mb_start in range(0, batch_size, ref_micro_batch_size):
-                mb_end = min(mb_start + ref_micro_batch_size, batch_size)
+            for mb_start in range(0, batch_size, micro_batch_size):
+                mb_end = min(mb_start + micro_batch_size, batch_size)
                 ref_mb_ids = ref_padded_ids[mb_start:mb_end].to(ref_device)
                 ref_mb_mask = ref_attention_mask[mb_start:mb_end].to(ref_device)
 
                 ref_mb_logits = self.ref_model(
                     input_ids=ref_mb_ids, attention_mask=ref_mb_mask
                 ).logits
-
                 ref_mb_log_probs = self.get_logprobs(ref_mb_logits, ref_mb_ids)
                 ref_log_probs_chunks.append(ref_mb_log_probs.to(output_device))
 
@@ -458,19 +458,45 @@ class GSPOTrainer:
                 torch.cuda.empty_cache()
 
             ref_log_probs = torch.cat(ref_log_probs_chunks, dim=0)
-            del ref_log_probs_chunks, ref_padded_ids, ref_attention_mask
+            del ref_padded_ids, ref_attention_mask
 
-        # Calculate Sequence-level log probabilities
-        # Sum log probs over completion tokens only, then divide by completion length
+        # Compute per-token KL before averaging
+        per_token_kl = (
+            torch.exp(ref_log_probs - log_probs.detach())
+            - (ref_log_probs - log_probs.detach())
+            - 1.0
+        )
+        seq_kl = (per_token_kl * valid_mask).sum(dim=1) / seq_lengths
+
+        # Calculate current sequence log probabilities
         seq_log_probs = (log_probs * valid_mask).sum(dim=1) / seq_lengths
-        ref_seq_log_probs = (ref_log_probs * valid_mask).sum(dim=1) / seq_lengths
 
-        del ref_log_probs, log_probs  # Free these before loss computation
+        # Enforce that rollouts MUST contain true generation logprobs
+        if rollouts.get("logprobs") is None or rollouts["logprobs"][0] is None:
+            raise ValueError(
+                "Fatal: Generation logprobs are missing. PPO/GRPO clipping requires true old logprobs to function."
+            )
 
-        # For a single forward pass per rollout, old_seq_log_probs is the detached current seq_log_probs
-        old_seq_log_probs = seq_log_probs.detach()
+        # Map the true generated logprobs to the exact same valid_mask window
+        old_logprobs_list = [
+            torch.tensor(lp, dtype=torch.float32) for lp in rollouts["logprobs"]
+        ]
+        padded_old_logprobs = torch.zeros(
+            batch_size, max_len, dtype=torch.float32, device=output_device
+        )
 
-        # Calculate GSPO Surrogate Loss (Sequence level)
+        for i in range(batch_size):
+            seq_len = len(prompt_ids[i]) + len(completion_ids[i])
+            prompt_len = len(prompt_ids[i])
+            offset = max_len - seq_len
+
+            padded_old_logprobs[i, offset + prompt_len - 1 : offset + seq_len - 1] = (
+                old_logprobs_list[i].to(output_device)
+            )
+
+        old_seq_log_probs = (padded_old_logprobs * valid_mask).sum(dim=1) / seq_lengths
+
+        # Calculate the true sequence ratio
         seq_ratio = torch.exp(seq_log_probs - old_seq_log_probs)
 
         surr1 = seq_ratio * advantages_tensor
@@ -480,26 +506,16 @@ class GSPOTrainer:
         )
         policy_loss = -torch.min(surr1, surr2)
 
-        # Calculate Sequence-level KL divergence penalty
-        seq_kl = (
-            torch.exp(ref_seq_log_probs - seq_log_probs)
-            - (ref_seq_log_probs - seq_log_probs)
-            - 1.0
-        )
-
-        # 6. Combine losses and average over the batch
+        # Combine losses
         combined_loss = (policy_loss + self.config.beta * seq_kl).mean()
 
         return combined_loss
 
     def train(self, resume_from_checkpoint=None):
-        """
-        Main training loop: rollout -> rewards -> advantages -> policy update
-        """
+        """Main training loop"""
         if not len(self.train_dataset):
             raise ValueError("train_dataset has length 0")
 
-        # Resume from checkpoint if specified
         if resume_from_checkpoint is not None:
             state_path = os.path.join(resume_from_checkpoint, "trainer_state.pt")
             if os.path.exists(state_path):
@@ -510,34 +526,36 @@ class GSPOTrainer:
                 self.global_step = state["global_step"]
                 self.epoch = state.get("epoch", 0)
 
-                self.model = AutoModelForCausalLM.from_pretrained(
+                # Load state dict into the EXISTING model object to preserve optimizer hooks
+                state_dict = AutoModelForCausalLM.from_pretrained(
                     resume_from_checkpoint,
                     torch_dtype=getattr(torch, self.config.torch_dtype),
                     attn_implementation=self.config.attn_implementation,
-                ).to(self.train_device)
-                self.model.train()
+                ).state_dict()
+
+                self.model.load_state_dict(state_dict)
+                del state_dict
+                torch.cuda.empty_cache()
+
                 self.pytorch_to_vllm_weights()
                 print(f"Resumed at step {self.global_step}")
 
         print(f"Starting training for {self.config.num_train_epochs} epochs")
-        print(f"Max steps: {self.config.max_steps}")
-        print(f"Batch size: {self.config.per_device_train_batch_size}")
-        print(f"Gradient accumulation steps: {self.config.gradient_accumulation_steps}")
-        print(f"Generations per prompt: {self.config.num_train_generations}")
-
         total_loss = 0.0
 
-        for epoch in range(self.config.num_train_epochs):
+        # Respect the loaded epoch on resume
+        for epoch in range(self.epoch, self.config.num_train_epochs):
             self.epoch = epoch
             print(f"Epoch {epoch+1}/{self.config.num_train_epochs}")
 
             epoch_iterator = tqdm(self.dataloader, desc=f"Epoch {epoch+1}")
 
             for step, batch in enumerate(epoch_iterator):
-                # 1. Generate rollouts using vLLM
                 prompts = batch["prompt"]
                 with torch.no_grad():
-                    rollouts = self.generate_rollouts(prompts, self.config.num_train_generations)
+                    rollouts = self.generate_rollouts(
+                        prompts, self.config.num_train_generations
+                    )
 
                 solutions = [
                     sol
@@ -545,53 +563,41 @@ class GSPOTrainer:
                     for _ in range(self.config.num_train_generations)
                 ]
 
-                # 2. Compute rewards
                 rewards = self.compute_rewards(rollouts["completions"], solutions)
 
-                # Save sample for logging before rollouts gets deleted
                 sample_prompt = prompts[0] if prompts else None
-                sample_completion = rollouts["completions"][0][:] if rollouts["completions"] else None
+                sample_completion = (
+                    rollouts["completions"][0][:] if rollouts["completions"] else None
+                )
                 sample_reward = rewards[0] if rewards else None
 
-                # 3. Calculate advantages using group normalization
                 advantages = self.compute_advantages(
                     rewards, self.config.num_train_generations
                 )
 
-                # 4. Compute policy loss
                 loss = self.compute_policy_loss(rollouts, advantages)
-
-                # Scale loss by gradient accumulation
                 loss = loss / self.config.gradient_accumulation_steps
                 loss.backward()
 
                 total_loss += loss.item()
 
-                # Free loss tensor and clear cache between steps
                 del loss, rollouts
                 torch.cuda.empty_cache()
 
-                # 5. Update policy if we've accumulated enough gradients
                 if (step + 1) % self.config.gradient_accumulation_steps == 0:
-                    # Gradient clipping
                     torch.nn.utils.clip_grad_norm_(
                         self.model.parameters(), max_norm=1.0
                     )
-
                     self.optimizer.step()
                     self.scheduler.step()
                     self.optimizer.zero_grad()
 
                     self.pytorch_to_vllm_weights()
-
                     self.global_step += 1
 
-                    # Logging
                     if self.global_step % self.config.logging_steps == 0:
-                        avg_loss = total_loss / (
-                            self.config.logging_steps
-                            * self.config.gradient_accumulation_steps
-                        )
+                        # Fixed loss average logging math
+                        avg_loss = total_loss / self.config.logging_steps
                         avg_reward = np.mean(rewards)
                         lr = self.scheduler.get_last_lr()[0]
 
@@ -604,46 +610,27 @@ class GSPOTrainer:
                         )
 
                         if self.introspect is not None:
-                            self.introspect.log_scalar_dict({
-                                "train/loss": avg_loss,
-                                "train/reward_mean": avg_reward,
-                                "train/learning_rate": lr,
-                                "train/epoch": epoch,
-                                "train/global_step": self.global_step,
-                            })
-
-                        if (
-                            self.config.log_completions
-                            and self.global_step % (self.config.logging_steps * 10) == 0
-                        ):
-                            print(f"Prompt: {sample_prompt}")
-                            print(f"Completion: {sample_completion}")
-                            print(f"Reward: {sample_reward:.4f}")
-
-                            if self.introspect is not None:
-                                self.introspect.log_completions_table(
-                                    prompts=[sample_prompt],
-                                    completions=[sample_completion],
-                                    rewards=[sample_reward],
-                                )
+                            self.introspect.log_scalar_dict(
+                                {
+                                    "train/loss": avg_loss,
+                                    "train/reward_mean": avg_reward,
+                                    "train/learning_rate": lr,
+                                    "train/epoch": epoch,
+                                    "train/global_step": self.global_step,
+                                }
+                            )
 
                         total_loss = 0.0
 
-                    # Save checkpoint
                     if self.global_step % self.config.save_steps == 0:
                         self.save_checkpoint()
 
                 if self.global_step >= self.config.max_steps:
                     break
-
             if self.global_step >= self.config.max_steps:
                 break
 
-        metrics = {
-            "train_loss": total_loss,
-            "final_step": self.global_step,
-        }
-
+        metrics = {"train_loss": total_loss, "final_step": self.global_step}
         return type("TrainOutput", (), {"metrics": metrics})()
 
     def save_checkpoint(self):
@@ -652,12 +639,9 @@ class GSPOTrainer:
             self.config.output_dir, f"checkpoint-{self.global_step}"
         )
         os.makedirs(checkpoint_dir, exist_ok=True)
-
         print(f"\nSaving checkpoint to {checkpoint_dir}")
         self.model.save_pretrained(checkpoint_dir)
         self.tokenizer.save_pretrained(checkpoint_dir)
-
-        # Save optimizer and scheduler state
         torch.save(
             {
                 "optimizer": self.optimizer.state_dict(),
@@ -669,7 +653,7 @@ class GSPOTrainer:
         )
 
     def evaluate(self):
-        """Evaluate the model on eval_dataset by generating completions and computing rewards."""
+        """Evaluate the model"""
         if self.eval_dataset is None:
             return {
                 "eval/reward_mean": 0.0,
@@ -700,18 +684,20 @@ class GSPOTrainer:
         with torch.no_grad():
             for batch in tqdm(eval_dataloader, desc="Evaluating"):
                 prompts = batch["prompt"]
-                rollouts = self.generate_rollouts(prompts, self.config.num_eval_generations)
-
+                rollouts = self.generate_rollouts(
+                    prompts, self.config.num_eval_generations
+                )
                 solutions = [
                     sol
                     for sol in batch["solution"]
                     for _ in range(self.config.num_eval_generations)
                 ]
-
                 rewards = self.compute_rewards(rollouts["completions"], solutions)
+
                 all_rewards.extend(rewards)
                 all_completions.extend(rollouts["completions"])
                 all_prompts.extend(rollouts["prompts"])
+
         metrics = {
             "eval/reward_mean": float(np.mean(all_rewards)),
             "eval/reward_std": float(np.std(all_rewards)),
@@ -723,19 +709,16 @@ class GSPOTrainer:
         if self.introspect is not None:
             self.introspect.log_scalar_dict(metrics)
             self.introspect.log_completions_table(
-                prompts=all_prompts,
-                completions=all_completions,
-                rewards=all_rewards,
+                prompts=all_prompts, completions=all_completions, rewards=all_rewards
             )
+
         return metrics
 
     def save_model(self):
         """Save the final trained model"""
         os.makedirs(self.config.output_dir, exist_ok=True)
-
         print(f"Saving final model to {self.config.output_dir}")
         self.model.save_pretrained(self.config.output_dir)
-
         config_dict = {
             k: v for k, v in self.config.__dict__.items() if not k.startswith("_")
         }
@@ -751,10 +734,9 @@ class GSPOTrainer:
         pass
 
     def save_state(self):
-        """Save full trainer state (optimizer, scheduler, step) for checkpoint resumption."""
+        """Save full trainer state"""
         os.makedirs(self.config.output_dir, exist_ok=True)
         state_path = os.path.join(self.config.output_dir, "trainer_state.pt")
-
         torch.save(
             {
                 "global_step": self.global_step,
@@ -767,24 +749,11 @@ class GSPOTrainer:
         print(f"Trainer state saved to {state_path}")
 
     def get_logprobs(self, logits, input_ids):
-        """
-        Compute per-token log probabilities from logits.
-
-        Args:
-            logits: (batch_size, seq_len, vocab_size) model output logits
-            input_ids: (batch_size, seq_len) token IDs
-
-        Returns:
-            (batch_size, seq_len - 1) per-token log probabilities
-        """
-        # Shift: logits[t] predicts input_ids[t+1]
+        """Compute per-token log probabilities from logits."""
         logits = logits[:, :-1, :]  # (B, T-1, V)
         target_ids = input_ids[:, 1:]  # (B, T-1)
-
         log_probs = torch.log_softmax(logits, dim=-1)
-        # Gather the log prob of the actual token
         per_token_logps = log_probs.gather(
             dim=-1, index=target_ids.unsqueeze(-1)
         ).squeeze(-1)
-
         return per_token_logps
