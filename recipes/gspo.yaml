@@ -55,6 +55,7 @@ reward_weights:
 epsilon: 0.2
 beta: 0.001
 pg_optimizer: gspo
+completion_logging_steps: 10
 
 save_steps: 50
 seed: 42
