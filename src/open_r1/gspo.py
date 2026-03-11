@@ -515,7 +515,7 @@ class GSPOTrainer:
 
         # Per-token KL (averaged per sequence for the penalty)
         per_token_kl = (
-            torch.exp(log_probs - ref_log_probs) - (log_probs - ref_log_probs) - 1.0
+            torch.exp(ref_log_probs - log_probs) - (ref_log_probs - log_probs) - 1.0
         )
         seq_kl = (per_token_kl * valid_mask).sum(dim=1) / seq_lengths
 
@@ -549,7 +549,9 @@ class GSPOTrainer:
         advantages_expanded = advantages_tensor.unsqueeze(1)
         surr1 = per_token_ratio * advantages_expanded
         surr2 = (
-            torch.clamp(per_token_ratio, 1.0 - self.config.epsilon, 1.0 + self.config.epsilon)
+            torch.clamp(
+                per_token_ratio, 1.0 - self.config.epsilon, 1.0 + self.config.epsilon
+            )
             * advantages_expanded
         )
         per_token_loss = -torch.min(surr1, surr2)
@@ -594,7 +596,9 @@ class GSPOTrainer:
         reward_sum = 0.0
         reward_count = 0
 
-        sample_outputs = dict(epochs=[], steps=[], prompts=[], completions=[], rewards=[])
+        sample_outputs = dict(
+            epochs=[], steps=[], prompts=[], completions=[], rewards=[]
+        )
         # Respect the loaded epoch on resume
         for epoch in range(self.epoch, self.config.num_train_epochs):
             self.epoch = epoch
@@ -631,7 +635,9 @@ class GSPOTrainer:
                 elif self.config.pg_optimizer == "grpo":
                     loss = self.compute_policy_loss_grpo(rollouts, advantages)
                 else:
-                    raise ValueError(f"Unknown pg_optimizer: {self.config.pg_optimizer}. Must be 'grpo' or 'gspo'.")
+                    raise ValueError(
+                        f"Unknown pg_optimizer: {self.config.pg_optimizer}. Must be 'grpo' or 'gspo'."
+                    )
                 loss = loss / self.config.gradient_accumulation_steps
                 loss.backward()
 
@@ -787,8 +793,8 @@ class GSPOTrainer:
             self.introspect.log_scalar_dict(metrics)
             self.introspect.log_completions_table(
                 key=f"completions_eval",
-                epochs=len(all_prompts)*[0],
-                steps=len(all_prompts)*[0],
+                epochs=len(all_prompts) * [0],
+                steps=len(all_prompts) * [0],
                 prompts=all_prompts,
                 completions=all_completions,
                 rewards=all_rewards,
