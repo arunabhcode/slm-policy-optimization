@@ -94,6 +94,11 @@ class GSPOTrainer:
                 shuffle=True,
                 collate_fn=custom_collate,
             )
+        self.completion_logging_prompts = []
+        self.completion_logging_solutions = []
+        if self.introspect is not None and getattr(self.config, "log_completions", False):
+            self.completion_logging_prompts = list(self.train_dataset["prompt"])
+            self.completion_logging_solutions = list(self.train_dataset["solution"])
 
         # Initialize vLLM for generation FIRST
         if self.use_vllm:
@@ -108,6 +113,34 @@ class GSPOTrainer:
         # Track training state
         self.global_step = 0
         self.epoch = 0
+
+    def should_log_train_completion_snapshot(self):
+        """Return whether the current step should emit a train completion table."""
+        return (
+            self.introspect is not None
+            and getattr(self.config, "log_completions", False)
+            and bool(self.completion_logging_prompts)
+            and self.config.completion_logging_steps > 0
+            and self.global_step % self.config.completion_logging_steps == 0
+        )
+
+    def log_train_completion_snapshot(self, epoch):
+        """Log one completion per tracked train prompt under a step-specific W&B key."""
+        with torch.no_grad():
+            rollouts = self.generate_rollouts(self.completion_logging_prompts, 1)
+
+        rewards = self.compute_rewards(
+            rollouts["completions"], self.completion_logging_solutions
+        )
+        num_rows = len(rollouts["prompts"])
+        self.introspect.log_completions_table(
+            key=f"completions_train_step_{self.global_step}",
+            epochs=[epoch] * num_rows,
+            steps=[self.global_step] * num_rows,
+            prompts=rollouts["prompts"],
+            completions=rollouts["completions"],
+            rewards=rewards,
+        )
 
     def init_vllm(self):
         """Initialize vLLM engine for generation"""
@@ -602,9 +635,6 @@ class GSPOTrainer:
         kl_sum = 0.0
         kl_count = 0
 
-        sample_outputs = dict(
-            epochs=[], steps=[], prompts=[], completions=[], rewards=[]
-        )
         # Respect the loaded epoch on resume
         for epoch in range(self.epoch, self.config.num_train_epochs):
             self.epoch = epoch
@@ -618,10 +648,6 @@ class GSPOTrainer:
                     rollouts = self.generate_rollouts(
                         prompts, self.config.num_train_generations
                     )
-                first_prompt = rollouts["prompts"][0] if rollouts["prompts"] else None
-                first_completion = (
-                    rollouts["completions"][0] if rollouts["completions"] else None
-                )
 
                 solutions = [
                     sol
@@ -630,7 +656,6 @@ class GSPOTrainer:
                 ]
 
                 rewards = self.compute_rewards(rollouts["completions"], solutions)
-                first_reward = rewards[0] if rewards else 0.0
 
                 advantages = self.compute_advantages(
                     rewards, self.config.num_train_generations
@@ -667,12 +692,6 @@ class GSPOTrainer:
                     self.pytorch_to_vllm_weights()
                     self.global_step += 1
 
-                    sample_outputs["epochs"].append(epoch)
-                    sample_outputs["steps"].append(step)
-                    sample_outputs["prompts"].append(first_prompt)
-                    sample_outputs["completions"].append(first_completion)
-                    sample_outputs["rewards"].append(first_reward)
-
                     if self.global_step % self.config.logging_steps == 0:
                         # Fixed loss average logging math
                         avg_loss = total_loss / self.config.logging_steps
@@ -707,6 +726,9 @@ class GSPOTrainer:
                         kl_sum = 0.0
                         kl_count = 0
 
+                    if self.should_log_train_completion_snapshot():
+                        self.log_train_completion_snapshot(epoch)
+
                     if self.global_step % self.config.save_steps == 0:
                         self.save_checkpoint()
 
@@ -715,16 +737,6 @@ class GSPOTrainer:
                     break
             if self.global_step >= self.config.max_steps:
                 break
-
-        if self.introspect is not None:
-            self.introspect.log_completions_table(
-                key=f"completions_train",
-                epochs=sample_outputs["epochs"],
-                steps=sample_outputs["steps"],
-                prompts=sample_outputs["prompts"],
-                completions=sample_outputs["completions"],
-                rewards=sample_outputs["rewards"],
-            )
 
         metrics = {"train_loss": total_loss, "final_step": self.global_step}
         return type("TrainOutput", (), {"metrics": metrics})()
@@ -775,6 +787,7 @@ class GSPOTrainer:
         all_rewards = []
         all_completions = []
         all_prompts = []
+        all_solutions = []
 
         self.model.eval()
         with torch.no_grad():
@@ -793,6 +806,7 @@ class GSPOTrainer:
                 all_rewards.extend(rewards)
                 all_completions.extend(rollouts["completions"])
                 all_prompts.extend(rollouts["prompts"])
+                all_solutions.extend(solutions)
 
         metrics = {
             "eval/reward_mean": float(np.mean(all_rewards)),
@@ -811,6 +825,7 @@ class GSPOTrainer:
                 prompts=all_prompts,
                 completions=all_completions,
                 rewards=all_rewards,
+                ground_truths=all_solutions,
             )
 
         return metrics

@@ -72,6 +72,7 @@ class GSPOConfig:
     vllm_mode: str = "server"  # "server" or "colocate"
     vllm_tensor_parallel_size: int = 1
     use_vllm: bool = True
+    completion_logging_steps: int = 10
 
     @classmethod
     def from_yaml(cls, path) -> "GSPOConfig":

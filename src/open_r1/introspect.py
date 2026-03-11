@@ -147,14 +147,53 @@ class Introspect:
         if log_data:
             wandb.log(log_data)
 
-    def log_completions_table(self, key, epochs, steps, prompts, completions, rewards):
+    def log_completions_table(
+        self,
+        key,
+        epochs,
+        steps,
+        prompts,
+        completions,
+        rewards,
+        ground_truths=None,
+    ):
         """
         Log a W&B Table of prompt / completion / reward rows.
         Truncates long strings to keep the table readable.
         """
-        table = wandb.Table(columns=["epoch", "step", "prompt", "completion", "reward"])
-        for epoch, step, prompt, completion, reward in zip(epochs, steps, prompts, completions, rewards):
+        has_ground_truths = ground_truths is not None
+        columns = ["epoch", "step", "prompt", "completion", "reward"]
+        if has_ground_truths:
+            columns.append("ground_truth")
+
+        table = wandb.Table(columns=columns)
+        row_iter = zip(epochs, steps, prompts, completions, rewards)
+        if has_ground_truths:
+            row_iter = zip(
+                epochs, steps, prompts, completions, rewards, ground_truths
+            )
+
+        for row in row_iter:
+            if has_ground_truths:
+                epoch, step, prompt, completion, reward, ground_truth = row
+            else:
+                epoch, step, prompt, completion, reward = row
+                ground_truth = None
+
             prompt_str = str(prompt)
             completion_str = str(completion)
-            table.add_data(epoch, step, prompt_str, completion_str, round(float(reward), 4))
+            reward_value = round(float(reward), 4)
+            if has_ground_truths:
+                table.add_data(
+                    epoch,
+                    step,
+                    prompt_str,
+                    completion_str,
+                    reward_value,
+                    str(ground_truth),
+                )
+            else:
+                table.add_data(
+                    epoch, step, prompt_str, completion_str, reward_value
+                )
         wandb.log({key: table}, commit=False)
