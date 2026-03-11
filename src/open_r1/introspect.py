@@ -147,14 +147,14 @@ class Introspect:
         if log_data:
             wandb.log(log_data)
 
-    def log_completions_table(self, key, prompts, completions, rewards):
+    def log_completions_table(self, key, epochs, steps, prompts, completions, rewards):
         """
         Log a W&B Table of prompt / completion / reward rows.
         Truncates long strings to keep the table readable.
         """
-        table = wandb.Table(columns=["prompt", "completion", "reward"])
-        for prompt, completion, reward in zip(prompts, completions, rewards):
+        table = wandb.Table(columns=["epoch", "step", "prompt", "completion", "reward"])
+        for epoch, step, prompt, completion, reward in zip(epochs, steps, prompts, completions, rewards):
             prompt_str = str(prompt)
             completion_str = str(completion)
-            table.add_data(prompt_str, completion_str, round(float(reward), 4))
+            table.add_data(epoch, step, prompt_str, completion_str, round(float(reward), 4))
         wandb.log({key: table}, commit=False)

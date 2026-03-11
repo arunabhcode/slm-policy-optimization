@@ -67,6 +67,7 @@ class GSPOConfig:
     train_device: str 
     ref_device: str 
     
+    pg_optimizer: str = "grpo"  # "grpo" or "gspo"
     auto_set_chat_template: bool = False
     vllm_mode: str = "server"  # "server" or "colocate"
     vllm_tensor_parallel_size: int = 1

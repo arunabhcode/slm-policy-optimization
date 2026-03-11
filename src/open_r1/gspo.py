@@ -594,6 +594,7 @@ class GSPOTrainer:
         reward_sum = 0.0
         reward_count = 0
 
+        sample_outputs = dict(epochs=[], steps=[], prompts=[], completions=[], rewards=[])
         # Respect the loaded epoch on resume
         for epoch in range(self.epoch, self.config.num_train_epochs):
             self.epoch = epoch
@@ -625,7 +626,12 @@ class GSPOTrainer:
                     rewards, self.config.num_train_generations
                 )
 
-                loss = self.compute_policy_loss_grpo(rollouts, advantages)
+                if self.config.pg_optimizer == "gspo":
+                    loss = self.compute_policy_loss_gspo(rollouts, advantages)
+                elif self.config.pg_optimizer == "grpo":
+                    loss = self.compute_policy_loss_grpo(rollouts, advantages)
+                else:
+                    raise ValueError(f"Unknown pg_optimizer: {self.config.pg_optimizer}. Must be 'grpo' or 'gspo'.")
                 loss = loss / self.config.gradient_accumulation_steps
                 loss.backward()
 
@@ -647,18 +653,11 @@ class GSPOTrainer:
                     self.pytorch_to_vllm_weights()
                     self.global_step += 1
 
-                    if (
-                        self.introspect is not None
-                        and self.global_step % 5 == 0
-                        and first_prompt is not None
-                        and first_completion is not None
-                    ):
-                        self.introspect.log_completions_table(
-                            key=f"completions_step_{step}_epoch_{epoch}",
-                            prompts=[first_prompt],
-                            completions=[first_completion],
-                            rewards=[first_reward],
-                        )
+                    sample_outputs["epochs"].append(epoch)
+                    sample_outputs["steps"].append(step)
+                    sample_outputs["prompts"].append(first_prompt)
+                    sample_outputs["completions"].append(first_completion)
+                    sample_outputs["rewards"].append(first_reward)
 
                     if self.global_step % self.config.logging_steps == 0:
                         # Fixed loss average logging math
@@ -697,6 +696,16 @@ class GSPOTrainer:
                     break
             if self.global_step >= self.config.max_steps:
                 break
+
+        if self.introspect is not None:
+            self.introspect.log_completions_table(
+                key=f"completions_train",
+                epochs=sample_outputs["epochs"],
+                steps=sample_outputs["steps"],
+                prompts=sample_outputs["prompts"],
+                completions=sample_outputs["completions"],
+                rewards=sample_outputs["rewards"],
+            )
 
         metrics = {"train_loss": total_loss, "final_step": self.global_step}
         return type("TrainOutput", (), {"metrics": metrics})()
@@ -778,7 +787,11 @@ class GSPOTrainer:
             self.introspect.log_scalar_dict(metrics)
             self.introspect.log_completions_table(
                 key=f"completions_eval",
-                prompts=all_prompts, completions=all_completions, rewards=all_rewards
+                epochs=len(all_prompts)*[0],
+                steps=len(all_prompts)*[0],
+                prompts=all_prompts,
+                completions=all_completions,
+                rewards=all_rewards,
             )
 
         return metrics
