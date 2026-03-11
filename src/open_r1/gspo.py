@@ -288,8 +288,8 @@ class GSPOTrainer:
         advantages = (rewards - mean) / std
         return advantages.flatten()
 
-    def compute_policy_loss(self, rollouts, advantages):
-        """Compute the policy gradient loss for GRPO securely and efficiently."""
+    def compute_policy_loss_gspo(self, rollouts, advantages):
+        """Compute the GSPO policy loss (length-normalized sequence-level ratio)."""
 
         prompt_ids = [
             torch.tensor(ids, dtype=torch.long) for ids in rollouts["prompt_ids"]
@@ -414,15 +414,148 @@ class GSPOTrainer:
 
         # Calculate the true sequence ratio
         seq_ratio = torch.exp(seq_log_probs - old_seq_log_probs)
+        print(f"seq_ratio: {seq_ratio}")
 
         surr1 = seq_ratio * advantages_tensor
+        print(f"surr1: {surr1}")
         surr2 = (
             torch.clamp(seq_ratio, 1.0 - self.config.epsilon, 1.0 + self.config.epsilon)
             * advantages_tensor
         )
+        print(f"surr2: {surr2}")
         policy_loss = -torch.min(surr1, surr2)
 
         # Combine losses
+        combined_loss = (policy_loss + self.config.beta * seq_kl).mean()
+        print(f"combined_loss: {combined_loss}")
+
+        return combined_loss
+
+    def compute_policy_loss_grpo(self, rollouts, advantages):
+        """Compute the GRPO policy loss"""
+
+        prompt_ids = [
+            torch.tensor(ids, dtype=torch.long) for ids in rollouts["prompt_ids"]
+        ]
+        completion_ids = [
+            torch.tensor(ids, dtype=torch.long) for ids in rollouts["completion_ids"]
+        ]
+        batch_size = len(completion_ids)
+
+        max_len = max(
+            (len(pids) + len(cids)) for pids, cids in zip(prompt_ids, completion_ids)
+        )
+
+        padded_ids = torch.zeros(batch_size, max_len, dtype=torch.long)
+        attention_mask = torch.zeros(batch_size, max_len, dtype=torch.long)
+        valid_mask = torch.zeros(batch_size, max_len - 1, dtype=torch.float32)
+        seq_lengths = torch.zeros(batch_size, dtype=torch.float32)
+
+        for i in range(batch_size):
+            conversation = torch.cat([prompt_ids[i], completion_ids[i]])
+            seq_len = len(conversation)
+            prompt_len = len(prompt_ids[i])
+
+            offset = max_len - seq_len
+            padded_ids[i, offset:] = conversation
+            attention_mask[i, offset:] = 1
+            valid_mask[i, offset + prompt_len - 1 : offset + seq_len - 1] = 1
+            seq_lengths[i] = len(completion_ids[i])
+
+        seq_lengths = torch.clamp(seq_lengths, min=1.0)
+
+        output_device = self.device
+        valid_mask = valid_mask.to(output_device)
+        seq_lengths = seq_lengths.to(output_device)
+        advantages_tensor = torch.tensor(
+            advantages, dtype=torch.float32, device=output_device
+        )
+
+        micro_batch_size = max(1, batch_size // 2)
+        log_probs_chunks = []
+
+        for mb_start in range(0, batch_size, micro_batch_size):
+            mb_end = min(mb_start + micro_batch_size, batch_size)
+            mb_ids = padded_ids[mb_start:mb_end].to(self.device)
+            mb_mask = attention_mask[mb_start:mb_end].to(self.device)
+
+            logits = self.model(input_ids=mb_ids, attention_mask=mb_mask).logits
+            mb_log_probs = self.get_logprobs(logits, mb_ids)
+            log_probs_chunks.append(mb_log_probs)
+
+            del logits, mb_ids, mb_mask
+            torch.cuda.synchronize(self.device)
+            torch.cuda.empty_cache()
+
+        log_probs = torch.cat(log_probs_chunks, dim=0)
+
+        ref_device = self.ref_device
+        ref_padded_ids = padded_ids.detach().clone()
+        ref_attention_mask = attention_mask.detach().clone()
+        ref_log_probs_chunks = []
+
+        with torch.no_grad():
+            for mb_start in range(0, batch_size, micro_batch_size):
+                mb_end = min(mb_start + micro_batch_size, batch_size)
+                ref_mb_ids = ref_padded_ids[mb_start:mb_end].to(ref_device)
+                ref_mb_mask = ref_attention_mask[mb_start:mb_end].to(ref_device)
+
+                ref_mb_logits = self.ref_model(
+                    input_ids=ref_mb_ids, attention_mask=ref_mb_mask
+                ).logits
+                ref_mb_log_probs = self.get_logprobs(ref_mb_logits, ref_mb_ids)
+                ref_log_probs_chunks.append(ref_mb_log_probs.to(output_device))
+
+                del ref_mb_logits, ref_mb_ids, ref_mb_mask
+                torch.cuda.synchronize(ref_device)
+                torch.cuda.empty_cache()
+
+            ref_log_probs = torch.cat(ref_log_probs_chunks, dim=0)
+            del ref_padded_ids, ref_attention_mask
+
+        # Per-token KL (averaged per sequence for the penalty)
+        per_token_kl = (
+            torch.exp(log_probs - ref_log_probs) - (log_probs - ref_log_probs) - 1.0
+        )
+        seq_kl = (per_token_kl * valid_mask).sum(dim=1) / seq_lengths
+
+        if rollouts.get("logprobs") is None or rollouts["logprobs"][0] is None:
+            raise ValueError(
+                "Fatal: Generation logprobs are missing. GRPO clipping requires true old logprobs to function."
+            )
+
+        old_logprobs_list = [
+            torch.tensor(lp, dtype=torch.float32) for lp in rollouts["logprobs"]
+        ]
+        padded_old_logprobs = torch.zeros(
+            batch_size, max_len - 1, dtype=torch.float32, device=output_device
+        )
+
+        for i in range(batch_size):
+            seq_len = len(prompt_ids[i]) + len(completion_ids[i])
+            prompt_len = len(prompt_ids[i])
+            offset = max_len - seq_len
+
+            comp_lp = old_logprobs_list[i].to(output_device)
+            start_idx = offset + prompt_len - 1
+            end_idx = start_idx + len(comp_lp)
+            padded_old_logprobs[i, start_idx:end_idx] = comp_lp
+
+        # Per-token ratio (no length normalization)
+        per_token_log_ratio = log_probs - padded_old_logprobs
+        per_token_ratio = torch.exp(per_token_log_ratio)
+
+        # Per-token clipped surrogate, broadcast sequence-level advantages
+        advantages_expanded = advantages_tensor.unsqueeze(1)
+        surr1 = per_token_ratio * advantages_expanded
+        surr2 = (
+            torch.clamp(per_token_ratio, 1.0 - self.config.epsilon, 1.0 + self.config.epsilon)
+            * advantages_expanded
+        )
+        per_token_loss = -torch.min(surr1, surr2)
+
+        # Average over valid completion tokens, then over batch
+        policy_loss = (per_token_loss * valid_mask).sum(dim=1) / seq_lengths
         combined_loss = (policy_loss + self.config.beta * seq_kl).mean()
 
         return combined_loss
@@ -458,6 +591,8 @@ class GSPOTrainer:
 
         print(f"Starting training for {self.config.num_train_epochs} epochs")
         total_loss = 0.0
+        reward_sum = 0.0
+        reward_count = 0
 
         # Respect the loaded epoch on resume
         for epoch in range(self.epoch, self.config.num_train_epochs):
@@ -472,6 +607,10 @@ class GSPOTrainer:
                     rollouts = self.generate_rollouts(
                         prompts, self.config.num_train_generations
                     )
+                first_prompt = rollouts["prompts"][0] if rollouts["prompts"] else None
+                first_completion = (
+                    rollouts["completions"][0] if rollouts["completions"] else None
+                )
 
                 solutions = [
                     sol
@@ -480,18 +619,21 @@ class GSPOTrainer:
                 ]
 
                 rewards = self.compute_rewards(rollouts["completions"], solutions)
+                first_reward = rewards[0] if rewards else 0.0
 
                 advantages = self.compute_advantages(
                     rewards, self.config.num_train_generations
                 )
 
-                loss = self.compute_policy_loss(rollouts, advantages)
+                loss = self.compute_policy_loss_grpo(rollouts, advantages)
                 loss = loss / self.config.gradient_accumulation_steps
                 loss.backward()
 
                 total_loss += loss.item()
+                reward_sum += float(np.sum(rewards))
+                reward_count += len(rewards)
 
-                del loss, rollouts
+                del loss
                 torch.cuda.empty_cache()
 
                 if (step + 1) % self.config.gradient_accumulation_steps == 0:
@@ -505,10 +647,23 @@ class GSPOTrainer:
                     self.pytorch_to_vllm_weights()
                     self.global_step += 1
 
+                    if (
+                        self.introspect is not None
+                        and self.global_step % 5 == 0
+                        and first_prompt is not None
+                        and first_completion is not None
+                    ):
+                        self.introspect.log_completions_table(
+                            key=f"completions_step_{step}_epoch_{epoch}",
+                            prompts=[first_prompt],
+                            completions=[first_completion],
+                            rewards=[first_reward],
+                        )
+
                     if self.global_step % self.config.logging_steps == 0:
                         # Fixed loss average logging math
                         avg_loss = total_loss / self.config.logging_steps
-                        avg_reward = np.mean(rewards)
+                        avg_reward = reward_sum / max(reward_count, 1)
                         lr = self.scheduler.get_last_lr()[0]
 
                         epoch_iterator.set_postfix(
@@ -531,10 +686,13 @@ class GSPOTrainer:
                             )
 
                         total_loss = 0.0
+                        reward_sum = 0.0
+                        reward_count = 0
 
                     if self.global_step % self.config.save_steps == 0:
                         self.save_checkpoint()
 
+                del rollouts
                 if self.global_step >= self.config.max_steps:
                     break
             if self.global_step >= self.config.max_steps:
@@ -619,6 +777,7 @@ class GSPOTrainer:
         if self.introspect is not None:
             self.introspect.log_scalar_dict(metrics)
             self.introspect.log_completions_table(
+                key=f"completions_eval",
                 prompts=all_prompts, completions=all_completions, rewards=all_rewards
             )
 

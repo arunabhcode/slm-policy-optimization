@@ -28,7 +28,7 @@ class Introspect:
             entity=entity_name,
             project=project_name,
             config=config_dict,
-            mode="online",  # this is online even for local w&b server even though messaging says cloud sync
+            # mode="online",  # this is online even for local w&b server even though messaging says cloud sync
         )
 
     def finalize(self):
@@ -147,7 +147,7 @@ class Introspect:
         if log_data:
             wandb.log(log_data)
 
-    def log_completions_table(self, prompts, completions, rewards):
+    def log_completions_table(self, key, prompts, completions, rewards):
         """
         Log a W&B Table of prompt / completion / reward rows.
         Truncates long strings to keep the table readable.
@@ -157,4 +157,4 @@ class Introspect:
             prompt_str = str(prompt)
             completion_str = str(completion)
             table.add_data(prompt_str, completion_str, round(float(reward), 4))
-        wandb.log({"completions": table}, commit=False)
+        wandb.log({key: table}, commit=False)

@@ -75,7 +75,7 @@ def main(config):
 
     # Load the dataset
     dataset = load_dataset(config.dataset_name, name=config.dataset_config)
-    dataset[config.dataset_train_split] = dataset[config.dataset_train_split].select(range(100))
+    dataset[config.dataset_train_split] = dataset[config.dataset_train_split].select(range(4))
     ################
     # Load tokenizer
     ################
@@ -103,7 +103,7 @@ def main(config):
     # Initialize the GRPO trainer
     #############################
     eval_dataset = (
-        dataset[config.dataset_test_split].select(range(20))
+        dataset[config.dataset_test_split].select(range(4))
         if config.do_eval and config.dataset_test_split in dataset
         else None
     )
