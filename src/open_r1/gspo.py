@@ -377,9 +377,9 @@ class GSPOTrainer:
             ref_log_probs = torch.cat(ref_log_probs_chunks, dim=0)
             del ref_padded_ids, ref_attention_mask
 
-        # Compute per-token KL before averaging
+        # On-policy approximation to KL(current policy || reference)
         per_token_kl = (
-            torch.exp(log_probs - ref_log_probs) - (log_probs - ref_log_probs) - 1.0
+            torch.exp(ref_log_probs - log_probs) - (ref_log_probs - log_probs) - 1.0
         )
         seq_kl = (per_token_kl * valid_mask).sum(dim=1) / seq_lengths
 
@@ -414,22 +414,23 @@ class GSPOTrainer:
 
         # Calculate the true sequence ratio
         seq_ratio = torch.exp(seq_log_probs - old_seq_log_probs)
-        print(f"seq_ratio: {seq_ratio}")
+        # print(f"seq_ratio: {seq_ratio}")
 
         surr1 = seq_ratio * advantages_tensor
-        print(f"surr1: {surr1}")
+        # print(f"surr1: {surr1}")
         surr2 = (
             torch.clamp(seq_ratio, 1.0 - self.config.epsilon, 1.0 + self.config.epsilon)
             * advantages_tensor
         )
-        print(f"surr2: {surr2}")
+        # print(f"surr2: {surr2}")
         policy_loss = -torch.min(surr1, surr2)
 
         # Combine losses
         combined_loss = (policy_loss + self.config.beta * seq_kl).mean()
-        print(f"combined_loss: {combined_loss}")
+        mean_kl = seq_kl.mean().detach()
+        # print(f"combined_loss: {combined_loss}")
 
-        return combined_loss
+        return combined_loss, mean_kl
 
     def compute_policy_loss_grpo(self, rollouts, advantages):
         """Compute the GRPO policy loss"""
@@ -559,8 +560,9 @@ class GSPOTrainer:
         # Average over valid completion tokens, then over batch
         policy_loss = (per_token_loss * valid_mask).sum(dim=1) / seq_lengths
         combined_loss = (policy_loss + self.config.beta * seq_kl).mean()
+        mean_kl = seq_kl.mean().detach()
 
-        return combined_loss
+        return combined_loss, mean_kl
 
     def train(self, resume_from_checkpoint=None):
         """Main training loop"""
@@ -591,10 +593,14 @@ class GSPOTrainer:
                 self.pytorch_to_vllm_weights()
                 print(f"Resumed at step {self.global_step}")
 
+        self.optimizer.zero_grad(set_to_none=True)
+
         print(f"Starting training for {self.config.num_train_epochs} epochs")
         total_loss = 0.0
         reward_sum = 0.0
         reward_count = 0
+        kl_sum = 0.0
+        kl_count = 0
 
         sample_outputs = dict(
             epochs=[], steps=[], prompts=[], completions=[], rewards=[]
@@ -631,9 +637,9 @@ class GSPOTrainer:
                 )
 
                 if self.config.pg_optimizer == "gspo":
-                    loss = self.compute_policy_loss_gspo(rollouts, advantages)
+                    loss, mean_kl = self.compute_policy_loss_gspo(rollouts, advantages)
                 elif self.config.pg_optimizer == "grpo":
-                    loss = self.compute_policy_loss_grpo(rollouts, advantages)
+                    loss, mean_kl = self.compute_policy_loss_grpo(rollouts, advantages)
                 else:
                     raise ValueError(
                         f"Unknown pg_optimizer: {self.config.pg_optimizer}. Must be 'grpo' or 'gspo'."
@@ -644,11 +650,13 @@ class GSPOTrainer:
                 total_loss += loss.item()
                 reward_sum += float(np.sum(rewards))
                 reward_count += len(rewards)
+                kl_sum += float(mean_kl.item())
+                kl_count += 1
 
                 del loss
                 torch.cuda.empty_cache()
 
-                if (step + 1) % self.config.gradient_accumulation_steps == 0:
+                if (step + 1) % self.config.gradient_accumulation_steps == 0 or step == len(self.dataloader) - 1:
                     torch.nn.utils.clip_grad_norm_(
                         self.model.parameters(), max_norm=1.0
                     )
@@ -668,12 +676,14 @@ class GSPOTrainer:
                     if self.global_step % self.config.logging_steps == 0:
                         # Fixed loss average logging math
                         avg_loss = total_loss / self.config.logging_steps
-                        avg_reward = reward_sum / max(reward_count, 1)
+                        avg_reward = reward_sum / reward_count
+                        avg_kl = kl_sum / kl_count
                         lr = self.scheduler.get_last_lr()[0]
 
                         epoch_iterator.set_postfix(
                             {
                                 "loss": f"{avg_loss:.4f}",
+                                "kl": f"{avg_kl:.4f}",
                                 "reward": f"{avg_reward:.4f}",
                                 "lr": f"{lr:.2e}",
                             }
@@ -683,6 +693,7 @@ class GSPOTrainer:
                             self.introspect.log_scalar_dict(
                                 {
                                     "train/loss": avg_loss,
+                                    "train/kl_mean": avg_kl,
                                     "train/reward_mean": avg_reward,
                                     "train/learning_rate": lr,
                                     "train/epoch": epoch,
@@ -693,6 +704,8 @@ class GSPOTrainer:
                         total_loss = 0.0
                         reward_sum = 0.0
                         reward_count = 0
+                        kl_sum = 0.0
+                        kl_count = 0
 
                     if self.global_step % self.config.save_steps == 0:
                         self.save_checkpoint()
