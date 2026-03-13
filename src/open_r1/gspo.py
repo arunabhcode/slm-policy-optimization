@@ -360,7 +360,7 @@ class GSPOTrainer:
         # ---------------------------------------------------------
         # 1. Pre-compute Reference Log Probs (No Gradients)
         # ---------------------------------------------------------
-        micro_batch_size = max(1, batch_size // 2)
+        micro_batch_size = 1
         ref_device = self.ref_device
         ref_log_probs_chunks = []
 
@@ -403,6 +403,7 @@ class GSPOTrainer:
         # 3. Policy Forward & Backward Pass Loop
         # ---------------------------------------------------------
         total_loss_val = 0.0
+        total_kl_val = 0.0
 
         for mb_start in range(0, batch_size, micro_batch_size):
             mb_end = min(mb_start + micro_batch_size, batch_size)
@@ -449,15 +450,16 @@ class GSPOTrainer:
             # BACKWARD PASS INSIDE THE LOOP
             scaled_loss.backward()
 
-            # Accumulate the detached float value for the logger
+            # Accumulate the detached float values for the logger
             total_loss_val += (mb_combined_loss.detach().item() * (mb_size / batch_size))
+            total_kl_val += (mb_seq_kl.mean().detach().item() * (mb_size / batch_size))
 
             # Free up VRAM immediately
             del logits, mb_ids, mb_mask, mb_log_probs, scaled_loss, mb_combined_loss
-            torch.cuda.synchronize(self.device)
-            torch.cuda.empty_cache()
+            # torch.cuda.synchronize(self.device)
+            # torch.cuda.empty_cache()
 
-        return total_loss_val
+        return total_loss_val, total_kl_val
 
     def compute_policy_loss_grpo(self, rollouts, advantages):
         """Compute the GRPO policy loss"""
@@ -656,23 +658,24 @@ class GSPOTrainer:
                 )
 
                 if self.config.pg_optimizer == "gspo":
-                    loss, mean_kl = self.compute_policy_loss_gspo(rollouts, advantages)
+                    loss_val, kl_val = self.compute_policy_loss_gspo(rollouts, advantages)
                 elif self.config.pg_optimizer == "grpo":
                     loss, mean_kl = self.compute_policy_loss_grpo(rollouts, advantages)
+                    scaled_loss = loss / self.config.gradient_accumulation_steps
+                    scaled_loss.backward()
+                    loss_val = loss.item()
+                    kl_val = mean_kl.item()
+                    del loss, scaled_loss
                 else:
                     raise ValueError(
                         f"Unknown pg_optimizer: {self.config.pg_optimizer}. Must be 'grpo' or 'gspo'."
                     )
-                loss = loss / self.config.gradient_accumulation_steps
-                loss.backward()
 
-                total_loss += loss.item()
+                total_loss += loss_val
                 reward_sum += float(np.sum(rewards))
                 reward_count += len(rewards)
-                kl_sum += float(mean_kl.item())
-                kl_count += 1
+                kl_sum += kl_val
 
-                del loss
                 torch.cuda.empty_cache()
 
                 if (step + 1) % self.config.gradient_accumulation_steps == 0 or step == len(self.dataloader) - 1:
@@ -690,7 +693,7 @@ class GSPOTrainer:
                         # Fixed loss average logging math
                         avg_loss = total_loss / self.config.logging_steps
                         avg_reward = reward_sum / reward_count
-                        avg_kl = kl_sum / kl_count
+                        avg_kl = kl_sum / self.config.logging_steps
                         lr = self.scheduler.get_last_lr()[0]
 
                         epoch_iterator.set_postfix(
@@ -718,7 +721,6 @@ class GSPOTrainer:
                         reward_sum = 0.0
                         reward_count = 0
                         kl_sum = 0.0
-                        kl_count = 0
 
                     if self.should_log_train_completion_snapshot():
                         self.log_train_completion_snapshot(epoch)
