@@ -22,11 +22,12 @@ use_vllm: true
 vllm_device: cuda:0
 train_device: cuda:1
 ref_device: cuda:2
+
 ###############################################
 #############Training Arguments################
 ###############################################
-do_eval: true
-gradient_accumulation_steps: 1
+do_eval: false
+gradient_accumulation_steps: 4
 gradient_checkpointing: true
 gradient_checkpointing_kwargs:
   use_reentrant: false
@@ -37,13 +38,13 @@ lr_scheduler_type: cosine_with_min_lr
 lr_scheduler_kwargs:
   min_lr_rate: 0.1
 max_completion_length: 2048
-max_steps: 500
+max_steps: 501
 num_train_generations: 6
 num_eval_generations: 1
 num_train_epochs: 100
 output_dir: data/OpenRS-GSPO
-per_device_eval_batch_size: 2
-per_device_train_batch_size: 2
+per_device_eval_batch_size: 4
+per_device_train_batch_size: 4
 report_to:
   - wandb
 reward_funcs:
@@ -52,10 +53,11 @@ reward_funcs:
 reward_weights:
   - 1.0
   - 2.0
-epsilon: 0.2
+epsilon: 0.002
 beta: 0.001
 pg_optimizer: gspo
-completion_logging_steps: 10
+micro_batch_size: 1
+completion_logging_steps: 50
 
 save_steps: 50
 seed: 42

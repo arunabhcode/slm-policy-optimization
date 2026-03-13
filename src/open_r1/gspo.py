@@ -360,7 +360,7 @@ class GSPOTrainer:
         # ---------------------------------------------------------
         # 1. Pre-compute Reference Log Probs (No Gradients)
         # ---------------------------------------------------------
-        micro_batch_size = 1
+        micro_batch_size = self.config.micro_batch_size
         ref_device = self.ref_device
         ref_log_probs_chunks = []
 
