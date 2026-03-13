@@ -26,6 +26,8 @@ from transformers.trainer_utils import get_last_checkpoint
 
 from open_r1.configs import GRPOConfig
 from open_r1.rewards import (
+    pulse_reward_func,
+    random_reward_func,
     accuracy_reward,
     code_reward,
     format_reward,
@@ -40,10 +42,29 @@ from open_r1.utils import get_tokenizer
 from open_r1.utils.callbacks import get_callbacks
 from open_r1.utils.wandb_logging import init_wandb_training
 from trl import GRPOTrainer, ModelConfig, ScriptArguments, TrlParser, get_peft_config
-
+from open_r1.gtpo import GTPOTrainer
+from peft import LoraConfig
 
 logger = logging.getLogger(__name__)
 
+
+# Define the LoRA adapter settings
+peft_config = LoraConfig(
+    r=16,                      # The rank of the adapter (16 is a solid default)
+    lora_alpha=32,             # Scaling factor (usually 2x the rank)
+    lora_dropout=0.05,         # Slight dropout to prevent overfitting
+    bias="none",
+    task_type="CAUSAL_LM",     # Crucial for autoregressive models
+    target_modules=[
+        "q_proj", 
+        "k_proj", 
+        "v_proj", 
+        "o_proj",
+        "gate_proj", 
+        "up_proj", 
+        "down_proj"
+    ]
+)
 
 @dataclass
 class GRPOScriptArguments(ScriptArguments):
@@ -68,7 +89,7 @@ class GRPOScriptArguments(ScriptArguments):
     """
 
     reward_funcs: list[str] = field(
-        default_factory=lambda: ["accuracy", "format", "tag_count"],
+        default_factory=lambda: ["accuracy", "format", "tag_count", "pulse_reward_func"],
         metadata={
             "help": "List of reward functions. Possible values: 'accuracy', 'format', 'reasoning_steps', 'cosine', 'repetition_penalty', 'length', tag_count', 'code', 'code_format'"
         },
@@ -177,7 +198,9 @@ def main(script_args, training_args, model_args):
         "code_format": get_code_format_reward(language=script_args.code_language),
         "tag_count": tag_count_reward,
     }
-    reward_funcs = [REWARD_FUNCS_REGISTRY[func] for func in script_args.reward_funcs]
+    # reward_funcs = [REWARD_FUNCS_REGISTRY[func] for func in script_args.reward_funcs]
+    reward_funcs = [random_reward_func]  # For testing purposes, use only the random reward function
+    # reward_funcs = [REWARD_FUNCS_REGISTRY["cosine"]]  
 
     # Format into conversation
     def make_conversation(example):
@@ -196,9 +219,14 @@ def main(script_args, training_args, model_args):
             dataset[split] = dataset[split].remove_columns("messages")
 
     logger.info("*** Initializing model kwargs ***")
-    torch_dtype = (
-        model_args.torch_dtype if model_args.torch_dtype in ["auto", None] else getattr(torch, model_args.torch_dtype)
-    )
+# Safely infer the dtype directly from the TrainingArguments
+    if training_args.fp16:
+        torch_dtype = torch.float16
+    elif getattr(training_args, "bf16", False):
+        torch_dtype = torch.bfloat16
+    else:
+        torch_dtype = "auto"
+
     model_kwargs = dict(
         revision=model_args.model_revision,
         trust_remote_code=model_args.trust_remote_code,
@@ -211,15 +239,16 @@ def main(script_args, training_args, model_args):
     #############################
     # Initialize the GRPO trainer
     #############################
-    trainer = GRPOTrainer(
+    trainer = GTPOTrainer(
         model=model_args.model_name_or_path,
         reward_funcs=reward_funcs,
         args=training_args,
         train_dataset=dataset[script_args.dataset_train_split],
         eval_dataset=dataset[script_args.dataset_test_split] if training_args.eval_strategy != "no" else None,
-        peft_config=get_peft_config(model_args),
+        peft_config=peft_config,
         callbacks=get_callbacks(training_args, model_args),
         processing_class=tokenizer,
+        
     )
 
     ###############

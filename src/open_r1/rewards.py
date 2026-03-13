@@ -18,6 +18,21 @@ if is_e2b_available():
 
     load_dotenv()
 
+import random
+
+def pulse_reward_func(completions, **kwargs) -> list[float]:
+    rewards = []
+    for content in completions:
+        char_count = len(content)
+        # Add random noise to ensure std(r) > 0
+        reward = (char_count / 500.0) + random.uniform(-0.1, 0.1)
+        rewards.append(reward)
+    return rewards
+
+
+def random_reward_func(completions, **kwargs) -> list[float]:
+    rewards = [random.choice([0.0, 1.0]) for _ in completions]
+    return rewards
 
 def accuracy_reward(completions, solution, **kwargs):
     """Reward function that checks if the completion is the same as the ground truth."""
@@ -521,3 +536,4 @@ async def run_script(sbx: AsyncSandbox, script: str, language: str) -> float:
         return float(execution.text)
     except (TypeError, ValueError):
         return 0.0
+
