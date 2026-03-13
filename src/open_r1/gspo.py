@@ -11,6 +11,7 @@ import copy
 import os
 import json
 import transformers
+import torch.nn.functional as F
 
 from open_r1.utils.model_utils import get_tokenizer
 from open_r1.rewards import (
@@ -322,23 +323,17 @@ class GSPOTrainer:
         return advantages.flatten()
 
     def compute_policy_loss_gspo(self, rollouts, advantages):
-        """Compute the GSPO policy loss (length-normalized sequence-level ratio)."""
+        """Compute the GSPO policy loss safely with micro-batching and internal backprop."""
 
-        prompt_ids = [
-            torch.tensor(ids, dtype=torch.long) for ids in rollouts["prompt_ids"]
-        ]
-        completion_ids = [
-            torch.tensor(ids, dtype=torch.long) for ids in rollouts["completion_ids"]
-        ]
+        prompt_ids = [torch.tensor(ids, dtype=torch.long) for ids in rollouts["prompt_ids"]]
+        completion_ids = [torch.tensor(ids, dtype=torch.long) for ids in rollouts["completion_ids"]]
         batch_size = len(completion_ids)
 
-        max_len = max(
-            (len(pids) + len(cids)) for pids, cids in zip(prompt_ids, completion_ids)
-        )
+        max_len = max((len(pids) + len(cids)) for pids, cids in zip(prompt_ids, completion_ids))
 
         padded_ids = torch.zeros(batch_size, max_len, dtype=torch.long)
         attention_mask = torch.zeros(batch_size, max_len, dtype=torch.long)
-        valid_mask = torch.zeros(batch_size, max_len - 1, dtype=torch.long)
+        valid_mask = torch.zeros(batch_size, max_len - 1, dtype=torch.float32)
         seq_lengths = torch.zeros(batch_size, dtype=torch.float32)
 
         for i in range(batch_size):
@@ -360,46 +355,22 @@ class GSPOTrainer:
         output_device = self.device
         valid_mask = valid_mask.to(output_device)
         seq_lengths = seq_lengths.to(output_device)
-        advantages_tensor = torch.tensor(
-            advantages, dtype=torch.float32, device=output_device
-        )
+        advantages_tensor = torch.tensor(advantages, dtype=torch.float32, device=output_device)
 
-        # Micro-batching policy forward pass to avoid OOM
+        # ---------------------------------------------------------
+        # 1. Pre-compute Reference Log Probs (No Gradients)
+        # ---------------------------------------------------------
         micro_batch_size = max(1, batch_size // 2)
-        log_probs_chunks = []
-
-        for mb_start in range(0, batch_size, micro_batch_size):
-            mb_end = min(mb_start + micro_batch_size, batch_size)
-            mb_ids = padded_ids[mb_start:mb_end].to(self.device)
-            mb_mask = attention_mask[mb_start:mb_end].to(self.device)
-
-            logits = self.model(input_ids=mb_ids, attention_mask=mb_mask).logits
-            mb_log_probs = self.get_logprobs(logits, mb_ids)
-            log_probs_chunks.append(mb_log_probs)
-
-            del logits, mb_ids, mb_mask
-
-            # Fences off the memory allocator race condition
-            torch.cuda.synchronize(self.device)
-            torch.cuda.empty_cache()
-
-        log_probs = torch.cat(log_probs_chunks, dim=0)
-
-        # Micro-batching reference model
         ref_device = self.ref_device
-        ref_padded_ids = padded_ids.detach().clone()
-        ref_attention_mask = attention_mask.detach().clone()
         ref_log_probs_chunks = []
 
         with torch.no_grad():
             for mb_start in range(0, batch_size, micro_batch_size):
                 mb_end = min(mb_start + micro_batch_size, batch_size)
-                ref_mb_ids = ref_padded_ids[mb_start:mb_end].to(ref_device)
-                ref_mb_mask = ref_attention_mask[mb_start:mb_end].to(ref_device)
+                ref_mb_ids = padded_ids[mb_start:mb_end].to(ref_device)
+                ref_mb_mask = attention_mask[mb_start:mb_end].to(ref_device)
 
-                ref_mb_logits = self.ref_model(
-                    input_ids=ref_mb_ids, attention_mask=ref_mb_mask
-                ).logits
+                ref_mb_logits = self.ref_model(input_ids=ref_mb_ids, attention_mask=ref_mb_mask).logits
                 ref_mb_log_probs = self.get_logprobs(ref_mb_logits, ref_mb_ids)
                 ref_log_probs_chunks.append(ref_mb_log_probs.to(output_device))
 
@@ -408,30 +379,15 @@ class GSPOTrainer:
                 torch.cuda.empty_cache()
 
             ref_log_probs = torch.cat(ref_log_probs_chunks, dim=0)
-            del ref_padded_ids, ref_attention_mask
 
-        # On-policy approximation to KL(current policy || reference)
-        per_token_kl = (
-            torch.exp(ref_log_probs - log_probs) - (ref_log_probs - log_probs) - 1.0
-        )
-        seq_kl = (per_token_kl * valid_mask).sum(dim=1) / seq_lengths
-
-        # Calculate current sequence log probabilities
-        seq_log_probs = (log_probs * valid_mask).sum(dim=1) / seq_lengths
-
-        # Enforce that rollouts MUST contain true generation logprobs
+        # ---------------------------------------------------------
+        # 2. Setup Old Logprobs from Rollouts
+        # ---------------------------------------------------------
         if rollouts.get("logprobs") is None or rollouts["logprobs"][0] is None:
-            raise ValueError(
-                "Fatal: Generation logprobs are missing. PPO/GRPO clipping requires true old logprobs to function."
-            )
+            raise ValueError("Fatal: Generation logprobs are missing. PPO/GSPO clipping requires true old logprobs to function.")
 
-        # Map the true generated logprobs to the exact same valid_mask window
-        old_logprobs_list = [
-            torch.tensor(lp, dtype=torch.float32) for lp in rollouts["logprobs"]
-        ]
-        padded_old_logprobs = torch.zeros(
-            batch_size, max_len - 1, dtype=torch.float32, device=output_device
-        )
+        old_logprobs_list = [torch.tensor(lp, dtype=torch.float32) for lp in rollouts["logprobs"]]
+        padded_old_logprobs = torch.zeros(batch_size, max_len - 1, dtype=torch.float32, device=output_device)
 
         for i in range(batch_size):
             seq_len = len(prompt_ids[i]) + len(completion_ids[i])
@@ -443,27 +399,65 @@ class GSPOTrainer:
             end_idx = start_idx + len(comp_lp)
             padded_old_logprobs[i, start_idx:end_idx] = comp_lp
 
-        old_seq_log_probs = (padded_old_logprobs * valid_mask).sum(dim=1) / seq_lengths
+        # ---------------------------------------------------------
+        # 3. Policy Forward & Backward Pass Loop
+        # ---------------------------------------------------------
+        total_loss_val = 0.0
 
-        # Calculate the true sequence ratio
-        seq_ratio = torch.exp(seq_log_probs - old_seq_log_probs)
-        # print(f"seq_ratio: {seq_ratio}")
+        for mb_start in range(0, batch_size, micro_batch_size):
+            mb_end = min(mb_start + micro_batch_size, batch_size)
+            mb_size = mb_end - mb_start
 
-        surr1 = seq_ratio * advantages_tensor
-        # print(f"surr1: {surr1}")
-        surr2 = (
-            torch.clamp(seq_ratio, 1.0 - self.config.epsilon, 1.0 + self.config.epsilon)
-            * advantages_tensor
-        )
-        # print(f"surr2: {surr2}")
-        policy_loss = -torch.min(surr1, surr2)
+            # Slice everything for the current micro-batch
+            mb_ids = padded_ids[mb_start:mb_end].to(self.device)
+            mb_mask = attention_mask[mb_start:mb_end].to(self.device)
+            mb_valid_mask = valid_mask[mb_start:mb_end]
+            mb_seq_lengths = seq_lengths[mb_start:mb_end]
+            
+            mb_ref_log_probs = ref_log_probs[mb_start:mb_end]
+            mb_old_logprobs = padded_old_logprobs[mb_start:mb_end]
+            mb_advantages = advantages_tensor[mb_start:mb_end]
 
-        # Combine losses
-        combined_loss = (policy_loss + self.config.beta * seq_kl).mean()
-        mean_kl = seq_kl.mean().detach()
-        # print(f"combined_loss: {combined_loss}")
+            # Policy forward pass
+            logits = self.model(input_ids=mb_ids, attention_mask=mb_mask).logits
+            mb_log_probs = self.get_logprobs(logits, mb_ids)
 
-        return combined_loss, mean_kl
+            # --- Corrected KL Math ---
+            per_token_kl = torch.exp(mb_ref_log_probs - mb_log_probs) - (mb_ref_log_probs - mb_log_probs) - 1.0
+            mb_seq_kl = (per_token_kl * mb_valid_mask).sum(dim=1) / mb_seq_lengths
+
+            # --- GSPO Specific Math ---
+            # 1. Average the log probs over the valid sequence tokens first
+            mb_seq_log_probs = (mb_log_probs * mb_valid_mask).sum(dim=1) / mb_seq_lengths
+            mb_old_seq_log_probs = (mb_old_logprobs * mb_valid_mask).sum(dim=1) / mb_seq_lengths
+
+            # 2. Calculate the ratio at the sequence level
+            mb_seq_ratio = torch.exp(mb_seq_log_probs - mb_old_seq_log_probs)
+
+            # 3. Apply Surrogate clipping against the sequence advantages
+            mb_surr1 = mb_seq_ratio * mb_advantages
+            mb_surr2 = torch.clamp(mb_seq_ratio, 1.0 - self.config.epsilon, 1.0 + self.config.epsilon) * mb_advantages
+            mb_policy_loss = -torch.min(mb_surr1, mb_surr2)
+
+            # 4. Combine and scale for gradient accumulation
+            mb_combined_loss = (mb_policy_loss + self.config.beta * mb_seq_kl).mean()
+            
+            # Scale the loss so the gradients correctly represent the whole batch's mean
+            scaled_loss = mb_combined_loss * (mb_size / batch_size)
+            scaled_loss = scaled_loss / self.config.gradient_accumulation_steps
+
+            # BACKWARD PASS INSIDE THE LOOP
+            scaled_loss.backward()
+
+            # Accumulate the detached float value for the logger
+            total_loss_val += (mb_combined_loss.detach().item() * (mb_size / batch_size))
+
+            # Free up VRAM immediately
+            del logits, mb_ids, mb_mask, mb_log_probs, scaled_loss, mb_combined_loss
+            torch.cuda.synchronize(self.device)
+            torch.cuda.empty_cache()
+
+        return total_loss_val
 
     def compute_policy_loss_grpo(self, rollouts, advantages):
         """Compute the GRPO policy loss"""
@@ -865,11 +859,17 @@ class GSPOTrainer:
         print(f"Trainer state saved to {state_path}")
 
     def get_logprobs(self, logits, input_ids):
-        """Compute per-token log probabilities from logits."""
-        logits = logits[:, :-1, :]  # (B, T-1, V)
-        target_ids = input_ids[:, 1:]  # (B, T-1)
-        log_probs = torch.log_softmax(logits, dim=-1)
-        per_token_logps = log_probs.gather(
-            dim=-1, index=target_ids.unsqueeze(-1)
-        ).squeeze(-1)
+        """Compute per-token log probabilities from logits"""
+        logits = logits[:, :-1, :]
+        target_ids = input_ids[:, 1:]
+        
+        vocab_size = logits.size(-1)
+        
+        flat_logits = logits.reshape(-1, vocab_size)
+        flat_targets = target_ids.reshape(-1)
+        
+        nll = F.cross_entropy(flat_logits, flat_targets, reduction='none')
+        
+        per_token_logps = -nll.view(target_ids.shape)
+        
         return per_token_logps
