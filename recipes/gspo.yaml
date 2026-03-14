@@ -31,7 +31,7 @@ gradient_accumulation_steps: 4
 gradient_checkpointing: true
 gradient_checkpointing_kwargs:
   use_reentrant: false
-learning_rate: 1.0e-06
+learning_rate: 5.0e-06
 log_completions: true
 logging_steps: 1
 lr_scheduler_type: cosine_with_min_lr

@@ -75,7 +75,7 @@ def main(config):
 
     # Load the dataset
     dataset = load_dataset(config.dataset_name, name=config.dataset_config)
-    dataset[config.dataset_train_split] = dataset[config.dataset_train_split].select(range(4))
+    # dataset[config.dataset_train_split] = dataset[config.dataset_train_split].select(range(100))
     ################
     # Load tokenizer
     ################
