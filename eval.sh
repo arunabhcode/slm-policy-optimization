@@ -16,17 +16,12 @@ get_model_path() {
     # Experiment 1 checkpoints
     if [ "$exp" = "1" ]; then
         case $step in
-            50) echo "$GRPO_ROOT/checkpoint-50" ;;
-            100) echo "$GRPO_ROOT/checkpoint-100" ;;
             *) echo "unknown" ;;
         esac
     # Experiment 2 checkpoints
     elif [ "$exp" = "2" ]; then
         case $step in
-            50) echo "$GSPO_ROOT/checkpoint-50" ;;
-            100) echo "$GSPO_ROOT/checkpoint-100" ;;
             150) echo "$GSPO_ROOT/checkpoint-150" ;;
-            200) echo "$GSPO_ROOT/checkpoint-200" ;;
             *) echo "unknown" ;;
         esac
     else
@@ -39,8 +34,8 @@ get_steps() {
     exp=$1
 
     case $exp in
-        1) echo "50 100" ;;
-        2) echo "50 100 150 200" ;;
+        1) echo "" ;;
+        2) echo "150" ;;
         *) echo "" ;;
     esac
 }

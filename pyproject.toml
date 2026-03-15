@@ -41,6 +41,8 @@ dependencies = [
   "trl>=0.15.0",
   "vllm>=0.7.2",
   "wandb>=0.19.1",
+  "lighteval>=0.10.0",
+  "math-verify>=0.5.2"
 ]
 
 [project.optional-dependencies]
