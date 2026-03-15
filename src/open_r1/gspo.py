@@ -97,9 +97,13 @@ class GSPOTrainer:
             )
         self.completion_logging_prompts = []
         self.completion_logging_solutions = []
-        if self.introspect is not None and getattr(self.config, "log_completions", False):
+        if self.introspect is not None and getattr(
+            self.config, "log_completions", False
+        ):
             self.completion_logging_prompts = list(self.train_dataset["prompt"])[:10]
-            self.completion_logging_solutions = list(self.train_dataset["solution"])[:10]
+            self.completion_logging_solutions = list(self.train_dataset["solution"])[
+                :10
+            ]
 
         # Initialize vLLM for generation FIRST
         if self.use_vllm:
@@ -325,11 +329,17 @@ class GSPOTrainer:
     def compute_policy_loss_gspo(self, rollouts, advantages):
         """Compute the GSPO policy loss safely with micro-batching and internal backprop."""
 
-        prompt_ids = [torch.tensor(ids, dtype=torch.long) for ids in rollouts["prompt_ids"]]
-        completion_ids = [torch.tensor(ids, dtype=torch.long) for ids in rollouts["completion_ids"]]
+        prompt_ids = [
+            torch.tensor(ids, dtype=torch.long) for ids in rollouts["prompt_ids"]
+        ]
+        completion_ids = [
+            torch.tensor(ids, dtype=torch.long) for ids in rollouts["completion_ids"]
+        ]
         batch_size = len(completion_ids)
 
-        max_len = max((len(pids) + len(cids)) for pids, cids in zip(prompt_ids, completion_ids))
+        max_len = max(
+            (len(pids) + len(cids)) for pids, cids in zip(prompt_ids, completion_ids)
+        )
 
         padded_ids = torch.zeros(batch_size, max_len, dtype=torch.long)
         attention_mask = torch.zeros(batch_size, max_len, dtype=torch.long)
@@ -355,7 +365,9 @@ class GSPOTrainer:
         output_device = self.device
         valid_mask = valid_mask.to(output_device)
         seq_lengths = seq_lengths.to(output_device)
-        advantages_tensor = torch.tensor(advantages, dtype=torch.float32, device=output_device)
+        advantages_tensor = torch.tensor(
+            advantages, dtype=torch.float32, device=output_device
+        )
 
         # ---------------------------------------------------------
         # 1. Pre-compute Reference Log Probs (No Gradients)
@@ -370,7 +382,9 @@ class GSPOTrainer:
                 ref_mb_ids = padded_ids[mb_start:mb_end].to(ref_device)
                 ref_mb_mask = attention_mask[mb_start:mb_end].to(ref_device)
 
-                ref_mb_logits = self.ref_model(input_ids=ref_mb_ids, attention_mask=ref_mb_mask).logits
+                ref_mb_logits = self.ref_model(
+                    input_ids=ref_mb_ids, attention_mask=ref_mb_mask
+                ).logits
                 ref_mb_log_probs = self.get_logprobs(ref_mb_logits, ref_mb_ids)
                 ref_log_probs_chunks.append(ref_mb_log_probs.to(output_device))
 
@@ -384,10 +398,16 @@ class GSPOTrainer:
         # 2. Setup Old Logprobs from Rollouts
         # ---------------------------------------------------------
         if rollouts.get("logprobs") is None or rollouts["logprobs"][0] is None:
-            raise ValueError("Fatal: Generation logprobs are missing. PPO/GSPO clipping requires true old logprobs to function.")
+            raise ValueError(
+                "Fatal: Generation logprobs are missing. PPO/GSPO clipping requires true old logprobs to function."
+            )
 
-        old_logprobs_list = [torch.tensor(lp, dtype=torch.float32) for lp in rollouts["logprobs"]]
-        padded_old_logprobs = torch.zeros(batch_size, max_len - 1, dtype=torch.float32, device=output_device)
+        old_logprobs_list = [
+            torch.tensor(lp, dtype=torch.float32) for lp in rollouts["logprobs"]
+        ]
+        padded_old_logprobs = torch.zeros(
+            batch_size, max_len - 1, dtype=torch.float32, device=output_device
+        )
 
         for i in range(batch_size):
             seq_len = len(prompt_ids[i]) + len(completion_ids[i])
@@ -414,7 +434,7 @@ class GSPOTrainer:
             mb_mask = attention_mask[mb_start:mb_end].to(self.device)
             mb_valid_mask = valid_mask[mb_start:mb_end]
             mb_seq_lengths = seq_lengths[mb_start:mb_end]
-            
+
             mb_ref_log_probs = ref_log_probs[mb_start:mb_end]
             mb_old_logprobs = padded_old_logprobs[mb_start:mb_end]
             mb_advantages = advantages_tensor[mb_start:mb_end]
@@ -424,25 +444,38 @@ class GSPOTrainer:
             mb_log_probs = self.get_logprobs(logits, mb_ids)
 
             # --- Corrected KL Math ---
-            per_token_kl = torch.exp(mb_ref_log_probs - mb_log_probs) - (mb_ref_log_probs - mb_log_probs) - 1.0
+            per_token_kl = (
+                torch.exp(mb_ref_log_probs - mb_log_probs)
+                - (mb_ref_log_probs - mb_log_probs)
+                - 1.0
+            )
             mb_seq_kl = (per_token_kl * mb_valid_mask).sum(dim=1) / mb_seq_lengths
 
             # --- GSPO Specific Math ---
             # 1. Average the log probs over the valid sequence tokens first
-            mb_seq_log_probs = (mb_log_probs * mb_valid_mask).sum(dim=1) / mb_seq_lengths
-            mb_old_seq_log_probs = (mb_old_logprobs * mb_valid_mask).sum(dim=1) / mb_seq_lengths
+            mb_seq_log_probs = (mb_log_probs * mb_valid_mask).sum(
+                dim=1
+            ) / mb_seq_lengths
+            mb_old_seq_log_probs = (mb_old_logprobs * mb_valid_mask).sum(
+                dim=1
+            ) / mb_seq_lengths
 
             # 2. Calculate the ratio at the sequence level
             mb_seq_ratio = torch.exp(mb_seq_log_probs - mb_old_seq_log_probs)
 
             # 3. Apply Surrogate clipping against the sequence advantages
             mb_surr1 = mb_seq_ratio * mb_advantages
-            mb_surr2 = torch.clamp(mb_seq_ratio, 1.0 - self.config.epsilon, 1.0 + self.config.epsilon) * mb_advantages
+            mb_surr2 = (
+                torch.clamp(
+                    mb_seq_ratio, 1.0 - self.config.epsilon, 1.0 + self.config.epsilon
+                )
+                * mb_advantages
+            )
             mb_policy_loss = -torch.min(mb_surr1, mb_surr2)
 
             # 4. Combine and scale for gradient accumulation
             mb_combined_loss = (mb_policy_loss + self.config.beta * mb_seq_kl).mean()
-            
+
             # Scale the loss so the gradients correctly represent the whole batch's mean
             scaled_loss = mb_combined_loss * (mb_size / batch_size)
             scaled_loss = scaled_loss / self.config.gradient_accumulation_steps
@@ -451,8 +484,8 @@ class GSPOTrainer:
             scaled_loss.backward()
 
             # Accumulate the detached float values for the logger
-            total_loss_val += (mb_combined_loss.detach().item() * (mb_size / batch_size))
-            total_kl_val += (mb_seq_kl.mean().detach().item() * (mb_size / batch_size))
+            total_loss_val += mb_combined_loss.detach().item() * (mb_size / batch_size)
+            total_kl_val += mb_seq_kl.mean().detach().item() * (mb_size / batch_size)
 
             # Free up VRAM immediately
             del logits, mb_ids, mb_mask, mb_log_probs, scaled_loss, mb_combined_loss
@@ -629,7 +662,7 @@ class GSPOTrainer:
         reward_sum = 0.0
         reward_count = 0
         kl_sum = 0.0
-        kl_count = 0
+        loss_count = 0
 
         # Respect the loaded epoch on resume
         for epoch in range(self.epoch, self.config.num_train_epochs):
@@ -658,7 +691,9 @@ class GSPOTrainer:
                 )
 
                 if self.config.pg_optimizer == "gspo":
-                    loss_val, kl_val = self.compute_policy_loss_gspo(rollouts, advantages)
+                    loss_val, kl_val = self.compute_policy_loss_gspo(
+                        rollouts, advantages
+                    )
                 elif self.config.pg_optimizer == "grpo":
                     loss, mean_kl = self.compute_policy_loss_grpo(rollouts, advantages)
                     scaled_loss = loss / self.config.gradient_accumulation_steps
@@ -675,10 +710,15 @@ class GSPOTrainer:
                 reward_sum += float(np.sum(rewards))
                 reward_count += len(rewards)
                 kl_sum += kl_val
+                loss_count += 1
 
                 torch.cuda.empty_cache()
 
-                if (step + 1) % self.config.gradient_accumulation_steps == 0 or step == len(self.dataloader) - 1:
+                if (
+                    step + 1
+                ) % self.config.gradient_accumulation_steps == 0 or step == len(
+                    self.dataloader
+                ) - 1:
                     torch.nn.utils.clip_grad_norm_(
                         self.model.parameters(), max_norm=1.0
                     )
@@ -690,10 +730,9 @@ class GSPOTrainer:
                     self.global_step += 1
 
                     if self.global_step % self.config.logging_steps == 0:
-                        # Fixed loss average logging math
-                        avg_loss = total_loss / self.config.logging_steps
+                        avg_loss = total_loss / loss_count
                         avg_reward = reward_sum / reward_count
-                        avg_kl = kl_sum / self.config.logging_steps
+                        avg_kl = kl_sum / loss_count
                         lr = self.scheduler.get_last_lr()[0]
 
                         epoch_iterator.set_postfix(
@@ -721,6 +760,7 @@ class GSPOTrainer:
                         reward_sum = 0.0
                         reward_count = 0
                         kl_sum = 0.0
+                        loss_count = 0
 
                     if self.should_log_train_completion_snapshot():
                         self.log_train_completion_snapshot(epoch)
@@ -804,6 +844,8 @@ class GSPOTrainer:
                 all_prompts.extend(rollouts["prompts"])
                 all_solutions.extend(solutions)
 
+        self.model.train()
+
         metrics = {
             "eval/reward_mean": float(np.mean(all_rewards)),
             "eval/reward_std": float(np.std(all_rewards)),
@@ -864,14 +906,14 @@ class GSPOTrainer:
         """Compute per-token log probabilities from logits"""
         logits = logits[:, :-1, :]
         target_ids = input_ids[:, 1:]
-        
+
         vocab_size = logits.size(-1)
-        
+
         flat_logits = logits.reshape(-1, vocab_size)
         flat_targets = target_ids.reshape(-1)
-        
-        nll = F.cross_entropy(flat_logits, flat_targets, reduction='none')
-        
+
+        nll = F.cross_entropy(flat_logits, flat_targets, reduction="none")
+
         per_token_logps = -nll.view(target_ids.shape)
-        
+
         return per_token_logps
