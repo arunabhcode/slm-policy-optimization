@@ -27,7 +27,7 @@ ref_device: cuda:2
 #############Training Arguments################
 ###############################################
 do_eval: false
-gradient_accumulation_steps: 4
+gradient_accumulation_steps: 8
 gradient_checkpointing: true
 gradient_checkpointing_kwargs:
   use_reentrant: false
@@ -37,22 +37,20 @@ logging_steps: 1
 lr_scheduler_type: cosine_with_min_lr
 lr_scheduler_kwargs:
   min_lr_rate: 0.1
-max_completion_length: 2048
+max_completion_length: 3584
 max_steps: 501
 num_train_generations: 6
 num_eval_generations: 1
 num_train_epochs: 100
 output_dir: data/OpenRS-GSPO
-per_device_eval_batch_size: 4
-per_device_train_batch_size: 4
+per_device_eval_batch_size: 3
+per_device_train_batch_size: 3
 report_to:
   - wandb
 reward_funcs:
-  - format
   - accuracy
 reward_weights:
   - 1.0
-  - 2.0
 epsilon: 0.002
 beta: 0.001
 pg_optimizer: gspo

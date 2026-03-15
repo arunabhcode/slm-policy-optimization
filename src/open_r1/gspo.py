@@ -98,8 +98,8 @@ class GSPOTrainer:
         self.completion_logging_prompts = []
         self.completion_logging_solutions = []
         if self.introspect is not None and getattr(self.config, "log_completions", False):
-            self.completion_logging_prompts = list(self.train_dataset["prompt"])
-            self.completion_logging_solutions = list(self.train_dataset["solution"])
+            self.completion_logging_prompts = list(self.train_dataset["prompt"])[:10]
+            self.completion_logging_solutions = list(self.train_dataset["solution"])[:10]
 
         # Initialize vLLM for generation FIRST
         if self.use_vllm:
