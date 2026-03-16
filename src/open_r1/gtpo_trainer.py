@@ -8,7 +8,7 @@ from typing import Any, Callable, Optional, Sized, Union
 import torch
 import torch.utils.data
 import transformers
-from accelerate.utils import broadcast_object_list, gather, gather_object, is_peft_model, set_seed
+from accelerate.utils import broadcast_object_list, gather, gather_object, is_peft_model, set_seed, pad_across_processes
 from datasets import Dataset, IterableDataset
 from packaging import version
 from torch import nn
@@ -241,20 +241,21 @@ class GTPOTrainer(GRPOTrainer):
         # Gather the reward per function: this part is crucial, because the rewards are normalized per group and the
         # completions may be distributed across processes
         rewards_per_func = gather(rewards_per_func)
+        
+        entropies_padded = pad_across_processes(entropies, dim=1, pad_index=0.0)
+        completion_mask_padded = pad_across_processes(completion_mask, dim=1, pad_index=0)
+        global_entropies = gather(entropies_padded)
+        global_mask = gather(completion_mask_padded)
 
         # Apply weights to each reward function's output and sum
         rewards = (rewards_per_func * self.reward_weights.to(device).unsqueeze(0)).sum(dim=1)
         std_grouped_rewards = rewards.view(-1, self.num_generations).std(dim=1)
 
-        with torch.inference_mode():
-            outputs = self.model(prompt_completion_ids, attention_mask=attention_mask)
-            logits = outputs.logits[:, -(logits_to_keep + 1):-1, :]
-            entropies = self.entropy_from_logits(logits.detach())
 
         advantages = self._get_gtpo_advantages(
             rewards=rewards,
-            entropies=entropies,
-            mask=completion_mask
+            entropies=global_entropies,
+            mask=global_mask
         )
 
         # Slice to keep only the local part of the data
