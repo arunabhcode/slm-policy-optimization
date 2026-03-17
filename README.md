@@ -4,7 +4,7 @@
 
 ## Overview
 
-This repository accompanies our research on applying reinforcement learning algorithms to improve reasoning capabilities in small language models (1.5B–7B parameters). We investigate what training strategies, datasets, and hyperparameters yield the best reasoning performance at minimal cost.
+This repository accompanies our research on applying reinforcement learning algorithms to improve reasoning capabilities in small language models (1.5B parameters). We investigate what training strategies, datasets, and hyperparameters yield the best reasoning performance at minimal cost.
 
 ## Repo Map
 
