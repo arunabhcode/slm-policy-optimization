@@ -105,11 +105,11 @@ class GSPOTrainer:
                 :10
             ]
 
-        # Initialize vLLM for generation FIRST
+        # Initialize vLLM for generation
         if self.use_vllm:
             self.init_vllm()
 
-        # Initialize policy model for training SECOND
+        # Initialize policy model for training
         self.init_policy_model()
 
         # Initialize optimizer and scheduler
@@ -184,7 +184,6 @@ class GSPOTrainer:
         self.device = self.train_device
         self.model.train()
 
-        # Reference model — place on ref device
         self.ref_model = AutoModelForCausalLM.from_pretrained(
             self.config.model_name_or_path,
             revision=self.config.model_revision,
@@ -235,7 +234,7 @@ class GSPOTrainer:
             )
 
     def pytorch_to_vllm_weights(self):
-        """Resync pytorch weights back to VLLM safely (assumes TP=1)."""
+        """Resync pytorch weights back to VLLM."""
         with torch.no_grad():
             cpu_weights = [
                 (name, param.data.cpu())
@@ -261,7 +260,7 @@ class GSPOTrainer:
             temperature=self.config.temperature,
             max_tokens=self.config.max_completion_length,
             n=num_generations,
-            logprobs=1,  # Request logprobs from vLLM
+            logprobs=1,
         )
 
         formatted_prompts = [
@@ -327,7 +326,7 @@ class GSPOTrainer:
         return advantages.flatten()
 
     def compute_policy_loss_gspo(self, rollouts, advantages):
-        """Compute the GSPO policy loss safely with micro-batching and internal backprop."""
+        """Compute the GSPO policy loss with micro-batching and internal backprop."""
 
         prompt_ids = [
             torch.tensor(ids, dtype=torch.long) for ids in rollouts["prompt_ids"]
@@ -369,9 +368,6 @@ class GSPOTrainer:
             advantages, dtype=torch.float32, device=output_device
         )
 
-        # ---------------------------------------------------------
-        # 1. Pre-compute Reference Log Probs (No Gradients)
-        # ---------------------------------------------------------
         micro_batch_size = self.config.micro_batch_size
         ref_device = self.ref_device
         ref_log_probs_chunks = []
@@ -394,9 +390,6 @@ class GSPOTrainer:
 
             ref_log_probs = torch.cat(ref_log_probs_chunks, dim=0)
 
-        # ---------------------------------------------------------
-        # 2. Setup Old Logprobs from Rollouts
-        # ---------------------------------------------------------
         if rollouts.get("logprobs") is None or rollouts["logprobs"][0] is None:
             raise ValueError(
                 "Fatal: Generation logprobs are missing. PPO/GSPO clipping requires true old logprobs to function."
@@ -419,9 +412,6 @@ class GSPOTrainer:
             end_idx = start_idx + len(comp_lp)
             padded_old_logprobs[i, start_idx:end_idx] = comp_lp
 
-        # ---------------------------------------------------------
-        # 3. Policy Forward & Backward Pass Loop
-        # ---------------------------------------------------------
         total_loss_val = 0.0
         total_kl_val = 0.0
 
@@ -451,7 +441,6 @@ class GSPOTrainer:
             )
             mb_seq_kl = (per_token_kl * mb_valid_mask).sum(dim=1) / mb_seq_lengths
 
-            # --- GSPO Specific Math ---
             # 1. Average the log probs over the valid sequence tokens first
             mb_seq_log_probs = (mb_log_probs * mb_valid_mask).sum(
                 dim=1
@@ -480,14 +469,12 @@ class GSPOTrainer:
             scaled_loss = mb_combined_loss * (mb_size / batch_size)
             scaled_loss = scaled_loss / self.config.gradient_accumulation_steps
 
-            # BACKWARD PASS INSIDE THE LOOP
             scaled_loss.backward()
 
             # Accumulate the detached float values for the logger
             total_loss_val += mb_combined_loss.detach().item() * (mb_size / batch_size)
             total_kl_val += mb_seq_kl.mean().detach().item() * (mb_size / batch_size)
 
-            # Free up VRAM immediately
             del logits, mb_ids, mb_mask, mb_log_probs, scaled_loss, mb_combined_loss
             # torch.cuda.synchronize(self.device)
             # torch.cuda.empty_cache()
@@ -667,9 +654,9 @@ class GSPOTrainer:
         # Respect the loaded epoch on resume
         for epoch in range(self.epoch, self.config.num_train_epochs):
             self.epoch = epoch
-            print(f"Epoch {epoch+1}/{self.config.num_train_epochs}")
+            print(f"Epoch {epoch + 1}/{self.config.num_train_epochs}")
 
-            epoch_iterator = tqdm(self.dataloader, desc=f"Epoch {epoch+1}")
+            epoch_iterator = tqdm(self.dataloader, desc=f"Epoch {epoch + 1}")
 
             for step, batch in enumerate(epoch_iterator):
                 prompts = batch["prompt"]
