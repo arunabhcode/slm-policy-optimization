@@ -92,6 +92,7 @@ class GTPOTrainer(GRPOTrainer):
         for chunk in flat_logits.split(chunk_size, dim=0):
             logps = F.log_softmax(chunk, dim=-1)
             chunk_entropy = -(torch.exp(logps) * logps).sum(-1)
+            chunk_entropy = torch.clamp(chunk_entropy, min=0.2, max=0.28)
             entropies.append(chunk_entropy)
 
         entropies = torch.cat(entropies, dim=0)
@@ -382,7 +383,7 @@ class GTPOTrainer(GRPOTrainer):
         self._metrics[mode]["clip_ratio"].append(self.accelerator.gather_for_metrics(clip_ratio).mean().item())
         return loss
 
-    def _get_gtpo_advantages(self, rewards, entropies, mask, success_threshold=0.5):
+    def _get_gtpo_advantages(self, rewards, entropies, mask, success_threshold=0.5, beta1 = 1, beta2 = 0.1):
         """
         Calculates detached advantages for GTPO.
         """
@@ -405,8 +406,8 @@ class GTPOTrainer(GRPOTrainer):
             neg_logits = (1.0 / grouped_mean_entropies.clamp(min=1e-3)).masked_fill(success_mask == 1, safe_mask_val)
             neg_weights = torch.softmax(neg_logits, dim=1) # (B, G)
 
-            positive_rewards = 0.5 * grouped_rewards + 0.5 * pos_weights * success_mask.sum(dim=1, keepdim=True)
-            negative_rewards = -0.5 + 0.5 * neg_weights * (1 - success_mask).sum(dim=1, keepdim=True)
+            positive_rewards = beta1 * grouped_rewards + beta2 * pos_weights * success_mask.sum(dim=1, keepdim=True)
+            negative_rewards = beta1 * (-1) + beta2 * neg_weights * (1 - success_mask).sum(dim=1, keepdim=True)
 
             # 2. Bulletproof variance calculations to prevent sqrt(negative) edge cases
             pos_mean = positive_rewards.mean(dim=1, keepdim=True) # (B, 1)
